@@ -261,13 +261,23 @@ def build_personalised_message(company_name: str, analysis: dict[str, Any]) -> s
         raise ValueError("The lead's company_name is required to build outreach.")
 
     concrete_problem = analysis["concreteProblem"].strip()
-    automation_workflow = analysis["automationWorkflow"].strip()
+    automation_workflow = " ".join(analysis["automationWorkflow"].split())
     practical_benefit = analysis["practicalBenefit"].strip()
+    workflow_prefix = "bkz peut mettre en place"
+    normalized_workflow = automation_workflow.casefold()
+    if not normalized_workflow.startswith(workflow_prefix):
+        raise ValueError(
+            'Groq\'s automationWorkflow must start with "BKZ peut mettre en place".'
+        )
+    if normalized_workflow.count(workflow_prefix) != 1:
+        raise ValueError(
+            'Groq repeated "BKZ peut mettre en place" in automationWorkflow.'
+        )
     message = f"""Bonjour {company_name},
 
 {concrete_problem}
 
-BKZ peut mettre en place {automation_workflow}
+{automation_workflow}
 
 {practical_benefit}
 
@@ -358,9 +368,10 @@ Controlled outreach components:
   workflow, service, or benefit.
 - concreteProblem: 25 to 35 words describing one precise likely operational or commercial issue.
   Do not include a greeting, company name salutation, BKZ introduction, solution, or call to action.
-- automationWorkflow: 35 to 50 words forming a natural grammatical continuation after
-  "BKZ peut mettre en place". Explain the exact trigger, captured information, centralisation,
-  qualification or routing, and relevant follow-up or visibility. Do not repeat the problem.
+- automationWorkflow: a complete professional French sentence of 35 to 50 words starting exactly
+  with "BKZ peut mettre en place". Use that phrase once only. Explain the exact trigger, captured
+  information, centralisation, qualification or routing, and relevant follow-up or visibility.
+  Do not repeat the problem.
 - practicalBenefit: 15 to 25 words stating one direct business result only. Do not include a
   greeting, solution, workflow, service, or call to action; the Python template adds the demo CTA.
 - recommendedService must name the single BKZ service used by automationWorkflow.
