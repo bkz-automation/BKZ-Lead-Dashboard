@@ -54,6 +54,32 @@ REQUIRED_COLUMNS = [
     "reply_summary",
     "gmail_message_id",
 ]
+
+
+def streamlit_secret(name: str) -> str | None:
+    """Return one Streamlit secret without failing during local execution."""
+    try:
+        value = st.secrets[name]
+    except Exception:
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def streamlit_json_secret(name: str) -> dict[str, Any] | None:
+    """Parse a JSON TOML secret in memory without exposing its contents."""
+    raw_value = streamlit_secret(name)
+    if raw_value is None:
+        return None
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Streamlit secret {name} is not valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"Streamlit secret {name} must contain a JSON object.")
+    return parsed
 QUALIFICATION_LABELS = {
     "high_priority": "High Priority",
     "qualified": "Qualified",
@@ -109,16 +135,24 @@ def normalise_leads(data: pd.DataFrame) -> pd.DataFrame:
 
 def connect_google_worksheet(sheet_id: str, worksheet_name: str, service_file: str) -> Any:
     """Authenticate securely and return the configured Google Sheets worksheet."""
-    credentials_path = Path(service_file)
-    if not credentials_path.is_absolute():
-        credentials_path = APP_DIR / credentials_path
-    if not credentials_path.exists():
-        raise FileNotFoundError(f"Service account file not found: {credentials_path.name}")
     if not sheet_id:
         raise ValueError("GOOGLE_SHEET_ID is not configured.")
-    credentials = Credentials.from_service_account_file(
-        str(credentials_path), scopes=GOOGLE_SCOPES
-    )
+    service_account_info = streamlit_json_secret("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if service_account_info is not None:
+        credentials = Credentials.from_service_account_info(
+            service_account_info, scopes=GOOGLE_SCOPES
+        )
+    else:
+        credentials_path = Path(service_file)
+        if not credentials_path.is_absolute():
+            credentials_path = APP_DIR / credentials_path
+        if not credentials_path.exists():
+            raise FileNotFoundError(
+                f"Service account file not found: {credentials_path.name}"
+            )
+        credentials = Credentials.from_service_account_file(
+            str(credentials_path), scopes=GOOGLE_SCOPES
+        )
     client = gspread.authorize(credentials)
     return client.open_by_key(sheet_id).worksheet(worksheet_name)
 
@@ -350,6 +384,44 @@ def update_google_sheet(
 
 def gmail_credentials() -> GmailCredentials:
     """Load or create Gmail OAuth credentials without exposing token contents."""
+    cloud_token_info = streamlit_json_secret("GMAIL_TOKEN_JSON")
+    cloud_client_info = streamlit_json_secret("GMAIL_CREDENTIALS_JSON")
+    cloud_mode = any(
+        streamlit_secret(name) is not None
+        for name in (
+            "GROQ_API_KEY",
+            "GOOGLE_SHEET_ID",
+            "GOOGLE_WORKSHEET_NAME",
+            "GOOGLE_SERVICE_ACCOUNT_JSON",
+            "GMAIL_CREDENTIALS_JSON",
+            "GMAIL_TOKEN_JSON",
+        )
+    )
+    if cloud_mode:
+        if cloud_token_info is None:
+            raise RuntimeError("Streamlit secret GMAIL_TOKEN_JSON is required.")
+        token_info = dict(cloud_token_info)
+        client_config = cloud_client_info or {}
+        oauth_client = client_config.get("installed") or client_config.get("web") or {}
+        for key in ("client_id", "client_secret", "token_uri"):
+            if not token_info.get(key) and oauth_client.get(key):
+                token_info[key] = oauth_client[key]
+        try:
+            credentials = GmailCredentials.from_authorized_user_info(
+                token_info, GMAIL_SCOPES
+            )
+            if credentials.expired and credentials.refresh_token:
+                credentials.refresh(Request())
+        except Exception as exc:
+            raise RuntimeError(
+                "Streamlit Gmail credentials are invalid or could not be refreshed."
+            ) from exc
+        if not credentials.valid or not credentials.has_scopes(GMAIL_SCOPES):
+            raise RuntimeError(
+                "Streamlit Gmail token is invalid or lacks gmail.modify access."
+            )
+        return credentials
+
     credentials_path = APP_DIR / "gmail_credentials.json"
     token_path = APP_DIR / "gmail_token.json"
     if not credentials_path.exists():
@@ -744,10 +816,21 @@ def main() -> None:
     inject_theme()
 
     csv_path = os.getenv("LEADS_CSV_PATH", "leads.csv")
-    sheet_id = os.getenv("GOOGLE_SHEET_ID", "").strip() or DEFAULT_GOOGLE_SHEET_ID
-    worksheet_name = os.getenv("GOOGLE_WORKSHEET_NAME", "Leads").strip() or "Leads"
+    sheet_id = (
+        streamlit_secret("GOOGLE_SHEET_ID")
+        or os.getenv("GOOGLE_SHEET_ID", "").strip()
+        or DEFAULT_GOOGLE_SHEET_ID
+    )
+    worksheet_name = (
+        streamlit_secret("GOOGLE_WORKSHEET_NAME")
+        or os.getenv("GOOGLE_WORKSHEET_NAME", "Leads").strip()
+        or "Leads"
+    )
     service_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json").strip()
-    groq_api_key = os.getenv("GROQ_API_KEY", "").strip()
+    groq_api_key = (
+        streamlit_secret("GROQ_API_KEY")
+        or os.getenv("GROQ_API_KEY", "").strip()
+    )
     leads, warning, sheets_connected = load_leads(
         sheet_id, worksheet_name, service_file, csv_path
     )

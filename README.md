@@ -1,72 +1,118 @@
 # BKZ Lead Dashboard
 
-A professional dark Streamlit dashboard for reviewing, filtering, qualifying, and contacting business leads. Google Sheets is the primary live data source, with `leads.csv` retained as a local fallback.
+A dark Streamlit lead-operations dashboard with Google Sheets, Groq AI qualification, Gmail sending and reply monitoring, WhatsApp outreach, safe email queuing, reply KPIs, and persistent notifications.
 
-## Features
+The same application supports local Windows use and Streamlit Community Cloud. Streamlit secrets take precedence online; local `.env` variables and JSON credential files remain the fallback.
 
-- Google Sheets lead loading and direct row updates
-- Automatic CSV fallback with clear connection warnings
-- KPI cards for total leads, qualified leads, emails sent, and average score
-- Filters for contact status, minimum score, and location
-- Full 12-column lead pipeline table with phone numbers preserved as text
-- Direct Groq AI scoring, qualification, service recommendation, and outreach generation
-- Persistent success and error notifications
-- Per-lead email and WhatsApp actions using the saved personalised message
-- AI Outreach Message panel with the complete saved Groq result
+## Local Windows setup
 
-## Setup
+1. Create and activate a Python virtual environment:
 
-1. Create and activate a Python virtual environment (Python 3.10 or newer recommended).
-2. Install dependencies:
-
-   ```bash
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
    pip install -r requirements.txt
    ```
 
-3. Create a Google Cloud service account with the Google Sheets API and Google Drive API enabled.
-4. Download its JSON key as `service_account.json` into this project folder.
-5. Share the target spreadsheet with the service account's `client_email` address as an editor.
-6. Copy `.env.example` to `.env` and configure it:
+2. Copy `.env.example` to `.env` and configure it:
 
    ```env
+   GROQ_API_KEY=your_groq_api_key
    GOOGLE_SHEET_ID=1V4sKtbuJQy-9fMhg3GHyS16BcYW6A0Euheew8FutMvc
    GOOGLE_WORKSHEET_NAME=Leads
    GOOGLE_SERVICE_ACCOUNT_FILE=service_account.json
    LEADS_CSV_PATH=leads.csv
-   GROQ_API_KEY=your_groq_api_key_here
    ```
 
-   Create the Groq key in the [Groq Console](https://console.groq.com/keys). Keep `.env` and `service_account.json` local and never commit either file. The dashboard does not display or print credentials.
-7. Start the app:
+3. Place these local credential files in the project root:
 
-   ```bash
+   - `service_account.json` — Google service account with spreadsheet access
+   - `gmail_credentials.json` — Gmail OAuth client configuration
+   - `gmail_token.json` — authorized Gmail token with `gmail.modify` scope
+
+4. Share the spreadsheet with the service account's `client_email` as an editor.
+5. Start the dashboard:
+
+   ```powershell
    streamlit run app.py
    ```
 
-Streamlit normally opens the dashboard at `http://localhost:8501`.
+If the local Gmail token expires and has a refresh token, it refreshes automatically. If no valid local token exists, the existing local browser OAuth flow is used.
 
-## Configuration
+## Streamlit Community Cloud deployment
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `GOOGLE_SHEET_ID` | Project spreadsheet | Google spreadsheet identifier |
-| `GOOGLE_WORKSHEET_NAME` | `Leads` | Worksheet containing lead records |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | `service_account.json` | Local service-account JSON path |
-| `LEADS_CSV_PATH` | `leads.csv` | Local fallback CSV path |
-| `GROQ_API_KEY` | empty | Required key for Groq AI analysis |
+1. Push the application code, `requirements.txt`, and non-secret project files to a private or appropriately secured GitHub repository.
+2. Create a Streamlit Community Cloud app and select `app.py` as the entry point.
+3. Open the app's **Advanced settings → Secrets** and add the following TOML configuration.
 
-Google Sheets is always attempted first. If authentication, access, or connectivity fails, the dashboard displays a warning and loads `leads.csv`. The sidebar shows **GOOGLE SHEETS** when connected and **CSV FALLBACK** otherwise.
+```toml
+GROQ_API_KEY = "your_groq_api_key"
+GOOGLE_SHEET_ID = "1V4sKtbuJQy-9fMhg3GHyS16BcYW6A0Euheew8FutMvc"
+GOOGLE_WORKSHEET_NAME = "Leads"
 
-## Groq analysis and updates
+GOOGLE_SERVICE_ACCOUNT_JSON = '''
+{
+  "type": "service_account",
+  "project_id": "your-project-id",
+  "private_key_id": "your-private-key-id",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nREPLACE_WITH_PRIVATE_KEY\n-----END PRIVATE KEY-----\n",
+  "client_email": "your-service-account@your-project.iam.gserviceaccount.com",
+  "client_id": "your-client-id",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "your-certificate-url"
+}
+'''
 
-Select a lead and click **Analyse with Groq AI**. The app validates Groq's JSON response, finds the matching Google Sheets row by `lead_id`, and saves `score`, `contact_status`, `personalised_message`, `recommended_service`, and `why_good_prospect`. It then refreshes the dashboard and retains the success or error message until dismissed.
+GMAIL_CREDENTIALS_JSON = '''
+{
+  "installed": {
+    "client_id": "your-client-id",
+    "client_secret": "your-client-secret",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "redirect_uris": ["http://localhost"]
+  }
+}
+'''
 
-If Google Sheets was unavailable when the dashboard loaded, the same fields are written to the local CSV fallback instead.
+GMAIL_TOKEN_JSON = '''
+{
+  "token": "your-access-token",
+  "refresh_token": "your-refresh-token",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "client_id": "your-client-id",
+  "client_secret": "your-client-secret",
+  "scopes": ["https://www.googleapis.com/auth/gmail.modify"]
+}
+'''
+```
 
-## Lead schema
+Use the complete, valid JSON from the corresponding local credential files—not the placeholders above. TOML triple-quoted strings preserve the embedded JSON and escaped private-key newlines.
 
-The worksheet and fallback CSV use these columns:
+On Streamlit Community Cloud:
 
-`lead_id`, `company_name`, `industry`, `location`, `email`, `phone`, `score`, `contact_status`, `personalised_message`, `sent_at`, `recommended_service`, `why_good_prospect`.
+- Google service-account credentials are created in memory with `Credentials.from_service_account_info(...)`.
+- Gmail credentials are created in memory from `GMAIL_TOKEN_JSON` and refreshed automatically when possible.
+- The app never writes Streamlit secret values into the repository or credential files.
+- Interactive Gmail browser authorization is disabled. Supply a valid token with a refresh token and `gmail.modify` scope.
 
-Missing columns are normalized safely for display and added to Google Sheets when an update requires them. Sheet values are read as strings before normalization, preserving international phone-number formatting.
+## Exact Streamlit secret names
+
+- `GROQ_API_KEY`
+- `GOOGLE_SHEET_ID`
+- `GOOGLE_WORKSHEET_NAME`
+- `GOOGLE_SERVICE_ACCOUNT_JSON`
+- `GMAIL_CREDENTIALS_JSON`
+- `GMAIL_TOKEN_JSON`
+
+## Security warning
+
+Never commit `.env`, `.streamlit/secrets.toml`, `service_account.json`, `gmail_credentials.json`, or `gmail_token.json`. They are covered by the project `.gitignore`, but verify staged files before every commit. Never paste real credentials into README files, source code, issues, logs, or screenshots.
+
+## Data and fallback behavior
+
+Google Sheets is the primary data source. When it is unavailable locally, the dashboard uses `leads.csv` as a fallback and displays that source in the sidebar. Google Sheets remains required for Gmail status and reply updates.
+
+The application preserves all lead qualification, Gmail sending, safe queue, reply monitoring, filters, KPIs, WhatsApp, notification, and AI Outreach Message features in both environments.
