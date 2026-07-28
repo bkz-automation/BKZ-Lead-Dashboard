@@ -280,18 +280,28 @@ contains a clear, specific reason for a lower score. The qualification must alwa
 score range exactly.
 
 Requirements for "personalisedMessage":
-- Write in professional, natural French.
-- Write between 100 and 160 words.
-- Address the company by its actual name.
-- Mention its industry and location when those values are available in the lead data.
-- Use the website, business description, and automation opportunity when available to make the
-  message specific and relevant. Do not claim to have visited or verified the website.
-- Identify one likely operational or commercial problem based only on the available lead data.
-  Present it as a likely challenge rather than an established fact.
-- Recommend one specific BKZ service from the service list that fits the company, and use the
-  same service in "recommendedService".
-- Explain the practical business benefit clearly and concretely.
-- Include a clear call to action for a short call or a free demo.
+- Write 110 to 170 words in professional, natural French using short paragraphs.
+- Base the message specifically on company_name, industry, location, website,
+  business_description, and automation_opportunity. Use only fields that contain information.
+- Address the company by its actual name and mention its industry and location when available.
+- State one concrete operational or commercial problem that is directly supported by the lead
+  data. Present any inference as a likely issue, never as a confirmed internal fact.
+- Recommend one concrete BKZ solution that addresses that exact problem, and use the same
+  service in "recommendedService".
+- Explain how the automation would work in practice as a short, credible sequence: for example,
+  how a request is captured, centralised, qualified, routed, followed up, or made visible.
+- Mention WhatsApp, email, Google Sheets, lead qualification, automated follow-ups, or dashboards
+  only when the selected channel is relevant to this company's stated opportunity. Do not list
+  channels merely to make the message sound comprehensive.
+- State the direct business benefit in concrete terms, choosing the relevant outcome: saving
+  time, reducing missed leads, improving response speed, centralising requests, or improving
+  follow-up.
+- Avoid vague phrases such as "défis opérationnels importants", "améliorer votre productivité",
+  or "tâches répétitives" unless the same sentence immediately gives a precise example grounded
+  in the lead data.
+- Do not claim that BKZ reviewed private systems, internal tools, workflows, or processes. Do not
+  claim to have visited or verified the website.
+- End the sales text with a clear invitation for a short free demo.
 - Do not use placeholders such as [Nom], [Entreprise], or [Votre nom].
 - Do not invent unsupported facts, metrics, people, tools, or business problems.
 - End the message exactly with these two lines:
