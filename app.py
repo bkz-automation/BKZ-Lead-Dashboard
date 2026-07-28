@@ -213,14 +213,24 @@ def parse_groq_analysis(content: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise ValueError("Groq returned invalid JSON.") from exc
 
-    required = {"leadScore", "qualification", "recommendedService", "whyGoodProspect", "personalisedMessage"}
+    required = {
+        "leadScore",
+        "qualification",
+        "recommendedService",
+        "whyGoodProspect",
+        "concreteProblem",
+        "automationWorkflow",
+        "practicalBenefit",
+    }
     if not isinstance(result, dict) or not required.issubset(result):
         raise ValueError("Groq's response is missing one or more required fields.")
     if isinstance(result["leadScore"], bool) or not isinstance(result["leadScore"], int):
         raise ValueError("Groq's leadScore must be an integer.")
     if not 1 <= result["leadScore"] <= 10:
         raise ValueError("Groq's leadScore must be between 1 and 10.")
-    qualification = str(result["qualification"]).strip().lower()
+    if not isinstance(result["qualification"], str) or not result["qualification"].strip():
+        raise ValueError("Groq's qualification must be a non-empty string.")
+    qualification = result["qualification"].strip().lower()
     if qualification not in QUALIFICATION_LABELS:
         allowed = ", ".join(QUALIFICATION_LABELS)
         raise ValueError(f"Groq's qualification must be one of: {allowed}.")
@@ -231,11 +241,67 @@ def parse_groq_analysis(content: str) -> dict[str, Any]:
             f"A score of {result['leadScore']} requires {expected_qualification}."
         )
     result["qualification"] = qualification
-    for field in ("recommendedService", "whyGoodProspect", "personalisedMessage"):
+    for field in (
+        "recommendedService",
+        "whyGoodProspect",
+        "concreteProblem",
+        "automationWorkflow",
+        "practicalBenefit",
+    ):
         if not isinstance(result[field], str) or not result[field].strip():
             raise ValueError(f"Groq's {field} must be a non-empty string.")
         result[field] = result[field].strip()
     return result
+
+
+def build_personalised_message(company_name: str, analysis: dict[str, Any]) -> str:
+    """Build and validate outreach using the controlled French template."""
+    company_name = str(company_name).strip()
+    if not company_name:
+        raise ValueError("The lead's company_name is required to build outreach.")
+
+    concrete_problem = analysis["concreteProblem"].strip()
+    automation_workflow = analysis["automationWorkflow"].strip()
+    practical_benefit = analysis["practicalBenefit"].strip()
+    message = f"""Bonjour {company_name},
+
+{concrete_problem}
+
+BKZ peut mettre en place {automation_workflow}
+
+{practical_benefit}
+
+Nous pouvons vous préparer une courte démonstration gratuite adaptée à votre activité.
+
+Site : https://bkz-automation.github.io/bkz-automation/
+WhatsApp : +212708434058"""
+
+    banned_phrases = (
+        "défis opérationnels importants",
+        "améliorer votre productivité",
+        "tâches répétitives",
+        "nous sommes convaincus",
+        "nous serions ravis de vous rencontrer",
+    )
+    lowered_message = message.casefold()
+    used_banned = [phrase for phrase in banned_phrases if phrase in lowered_message]
+    if used_banned:
+        raise ValueError("Groq returned prohibited generic wording.")
+
+    components = [
+        concrete_problem.casefold(),
+        automation_workflow.casefold(),
+        practical_benefit.casefold(),
+    ]
+    if len(set(components)) != len(components):
+        raise ValueError("Groq repeated the same outreach component.")
+
+    word_count = len(message.split())
+    if not 90 <= word_count <= 140:
+        raise ValueError(
+            f"The controlled outreach message must contain 90 to 140 words; received {word_count}."
+        )
+    return message
 
 
 def analyse_with_groq(api_key: str, lead: pd.Series) -> dict[str, Any]:
@@ -249,7 +315,11 @@ def analyse_with_groq(api_key: str, lead: pd.Series) -> dict[str, Any]:
 Do not use Markdown, commentary, or code fences. Use exactly these fields:
 {{"leadScore": <integer 1 to 10, never 0>,
 "qualification": <"high_priority", "qualified", "manual_review", or "low_priority">,
-"recommendedService": <string>, "whyGoodProspect": <string>, "personalisedMessage": <string>}}
+"recommendedService": <non-empty string>,
+"whyGoodProspect": <non-empty string>,
+"concreteProblem": <non-empty string>,
+"automationWorkflow": <non-empty string>,
+"practicalBenefit": <non-empty string>}}
 
 BKZ business context:
 - Business name: BKZ
@@ -279,47 +349,33 @@ realistic automation opportunity, it should normally score at least 4 unless the
 contains a clear, specific reason for a lower score. The qualification must always match the
 score range exactly.
 
-Requirements for "personalisedMessage":
-- Write 100 to 145 words in professional, natural French.
-- Base the message specifically on company_name, industry, location, website,
-  business_description, and automation_opportunity. Use only fields that contain information.
-- Start directly with company-specific context. Never start with "Nous sommes ravis de vous
-  rencontrer" or with a generic greeting about BKZ.
-- Use automation_opportunity as the main structure of the entire message. Every paragraph must
-  advance that single opportunity rather than introducing a second solution.
-- Use no more than three short sales paragraphs before the two footer lines:
-  1. The first paragraph must address the company by name and describe one concrete operational
-     issue supported by its industry, location, business description, website, or automation
-     opportunity. Present an inference as likely, never as a confirmed internal fact.
-  2. The second paragraph must explain one exact BKZ automation workflow in practical sequence:
-     what triggers it, what information it captures, where it is centralised, how it is qualified
-     or routed, and what follow-up or visibility it creates. Include only steps relevant to the
-     supplied automation opportunity.
-  3. The third paragraph must state one practical business benefit and invite the company to a
-     short free demo.
-- For a real-estate company, build the workflow from relevant concrete flows such as availability
-  requests, property information, tenant or buyer qualification, WhatsApp follow-up, reservation
-  follow-up, and lead centralisation. Choose only the flows supported by the lead data.
-- Recommend one concrete BKZ service that addresses the exact problem and use that same service
-  in "recommendedService". Mention the service once; do not restate it using synonyms.
+Controlled outreach components:
+- Do not write "personalisedMessage". Python builds the final message from your three components.
+- Write concreteProblem, automationWorkflow, and practicalBenefit in professional French, using
+  only facts supported by company_name, industry, location, website, business_description, and
+  automation_opportunity.
+- Use automation_opportunity as the central structure. Do not introduce a second problem,
+  workflow, service, or benefit.
+- concreteProblem: 25 to 35 words describing one precise likely operational or commercial issue.
+  Do not include a greeting, company name salutation, BKZ introduction, solution, or call to action.
+- automationWorkflow: 35 to 50 words forming a natural grammatical continuation after
+  "BKZ peut mettre en place". Explain the exact trigger, captured information, centralisation,
+  qualification or routing, and relevant follow-up or visibility. Do not repeat the problem.
+- practicalBenefit: 15 to 25 words stating one direct business result only. Do not include a
+  greeting, solution, workflow, service, or call to action; the Python template adds the demo CTA.
+- recommendedService must name the single BKZ service used by automationWorkflow.
+- whyGoodProspect must be concise and based only on supplied lead data.
+- For real-estate leads, focus only on supported flows among availability requests, property
+  information, buyer or tenant qualification, WhatsApp and email follow-up, reservation or visit
+  follow-up, and lead centralisation.
 - Mention WhatsApp, email, Google Sheets, lead qualification, automated follow-ups, or dashboards
-  only when the selected channel is relevant to this company's stated opportunity. Do not list
-  channels merely to make the message sound comprehensive.
-- State the selected benefit once and do not repeat the same service, workflow, promise, or
-  benefit in another paragraph.
-- Never use "défis opérationnels importants", "améliorer votre productivité", or "tâches
-  répétitives" unless the same sentence immediately provides a precise example grounded in the
-  lead data.
-- Do not claim that BKZ reviewed private systems, internal tools, workflows, or processes. Do not
-  claim to have visited or verified the website.
-- Do not use placeholders such as [Nom], [Entreprise], or [Votre nom].
-- Do not invent unsupported facts, metrics, people, tools, or business problems.
-- End the message exactly with these two lines:
-  Site : https://bkz-automation.github.io/bkz-automation/
-  WhatsApp : +212708434058
-
-Base "whyGoodProspect" only on the supplied lead data. Keep every JSON field as a JSON string
-where required and escape line breaks inside "personalisedMessage" correctly.
+  only where relevant to the supplied automation opportunity.
+- Never use "défis opérationnels importants", "améliorer votre productivité", "tâches
+  répétitives", "nous sommes convaincus", or "nous serions ravis de vous rencontrer".
+- Do not claim access to private systems or internal processes. Do not invent facts, metrics,
+  people, tools, problems, or outcomes.
+- Return raw JSON only. Do not use Markdown, greetings, signatures, website links, or WhatsApp
+  numbers inside the three outreach components.
 
 Lead data: {json.dumps(lead_payload, ensure_ascii=False)}"""
     try:
@@ -339,7 +395,11 @@ Lead data: {json.dumps(lead_payload, ensure_ascii=False)}"""
         )
         response.raise_for_status()
         payload = response.json()
-        return parse_groq_analysis(payload["choices"][0]["message"]["content"])
+        analysis = parse_groq_analysis(payload["choices"][0]["message"]["content"])
+        analysis["personalisedMessage"] = build_personalised_message(
+            str(lead.get("company_name", "")), analysis
+        )
+        return analysis
     except requests.RequestException as exc:
         detail = ""
         if exc.response is not None:
