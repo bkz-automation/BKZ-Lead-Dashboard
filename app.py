@@ -280,28 +280,38 @@ contains a clear, specific reason for a lower score. The qualification must alwa
 score range exactly.
 
 Requirements for "personalisedMessage":
-- Write 110 to 170 words in professional, natural French using short paragraphs.
+- Write 100 to 145 words in professional, natural French.
 - Base the message specifically on company_name, industry, location, website,
   business_description, and automation_opportunity. Use only fields that contain information.
-- Address the company by its actual name and mention its industry and location when available.
-- State one concrete operational or commercial problem that is directly supported by the lead
-  data. Present any inference as a likely issue, never as a confirmed internal fact.
-- Recommend one concrete BKZ solution that addresses that exact problem, and use the same
-  service in "recommendedService".
-- Explain how the automation would work in practice as a short, credible sequence: for example,
-  how a request is captured, centralised, qualified, routed, followed up, or made visible.
+- Start directly with company-specific context. Never start with "Nous sommes ravis de vous
+  rencontrer" or with a generic greeting about BKZ.
+- Use automation_opportunity as the main structure of the entire message. Every paragraph must
+  advance that single opportunity rather than introducing a second solution.
+- Use no more than three short sales paragraphs before the two footer lines:
+  1. The first paragraph must address the company by name and describe one concrete operational
+     issue supported by its industry, location, business description, website, or automation
+     opportunity. Present an inference as likely, never as a confirmed internal fact.
+  2. The second paragraph must explain one exact BKZ automation workflow in practical sequence:
+     what triggers it, what information it captures, where it is centralised, how it is qualified
+     or routed, and what follow-up or visibility it creates. Include only steps relevant to the
+     supplied automation opportunity.
+  3. The third paragraph must state one practical business benefit and invite the company to a
+     short free demo.
+- For a real-estate company, build the workflow from relevant concrete flows such as availability
+  requests, property information, tenant or buyer qualification, WhatsApp follow-up, reservation
+  follow-up, and lead centralisation. Choose only the flows supported by the lead data.
+- Recommend one concrete BKZ service that addresses the exact problem and use that same service
+  in "recommendedService". Mention the service once; do not restate it using synonyms.
 - Mention WhatsApp, email, Google Sheets, lead qualification, automated follow-ups, or dashboards
   only when the selected channel is relevant to this company's stated opportunity. Do not list
   channels merely to make the message sound comprehensive.
-- State the direct business benefit in concrete terms, choosing the relevant outcome: saving
-  time, reducing missed leads, improving response speed, centralising requests, or improving
-  follow-up.
-- Avoid vague phrases such as "défis opérationnels importants", "améliorer votre productivité",
-  or "tâches répétitives" unless the same sentence immediately gives a precise example grounded
-  in the lead data.
+- State the selected benefit once and do not repeat the same service, workflow, promise, or
+  benefit in another paragraph.
+- Never use "défis opérationnels importants", "améliorer votre productivité", or "tâches
+  répétitives" unless the same sentence immediately provides a precise example grounded in the
+  lead data.
 - Do not claim that BKZ reviewed private systems, internal tools, workflows, or processes. Do not
   claim to have visited or verified the website.
-- End the sales text with a clear invitation for a short free demo.
 - Do not use placeholders such as [Nom], [Entreprise], or [Votre nom].
 - Do not invent unsupported facts, metrics, people, tools, or business problems.
 - End the message exactly with these two lines:
