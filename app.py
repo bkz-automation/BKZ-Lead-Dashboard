@@ -307,9 +307,9 @@ WhatsApp : +212708434058"""
         raise ValueError("Groq repeated the same outreach component.")
 
     word_count = len(message.split())
-    if not 90 <= word_count <= 140:
+    if not 65 <= word_count <= 140:
         raise ValueError(
-            f"The controlled outreach message must contain 90 to 140 words; received {word_count}."
+            f"The controlled outreach message must contain 65 to 140 words; received {word_count}."
         )
     return message
 
