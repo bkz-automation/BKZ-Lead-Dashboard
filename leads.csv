@@ -1,0 +1,9 @@
+lead_id,company_name,industry,location,email,phone,score,contact_status,personalised_message,sent_at,recommended_service,why_good_prospect
+BKZ-001,Northstar Analytics,Technology,London,hello@northstar.example,+447700900101,9,Qualified,"Hi Maya, we can help Northstar turn more analytics interest into qualified pipeline.",2026-07-24 09:30,Analytics,Northstar Analytics is a qualified company in the Technology industry with a strong presence in London.
+BKZ-002,Atlas & Co,Consulting,Manchester,growth@atlas.example,+447700900102,78,Contacted,"Hi James, I have a practical idea for improving Atlas & Co's lead follow-up.",2026-07-22 14:15,,
+BKZ-003,Verdant Works,Sustainability,Bristol,team@verdant.example,+447700900103,8,Qualified,"Hi Priya, your sustainability work stood out; here is a way to scale outreach without losing relevance.",,Sustainability outreach scaling,sustainability work stood out
+BKZ-004,Forge Studio,Design,Leeds,studio@forge.example,+447700900104,64,New,"Hi Alex, we would love to show Forge Studio a simpler route from prospect research to conversation.",,,
+BKZ-005,Harbour Finance,Financial Services,London,partnerships@harbour.example,+447700900105,88,Contacted,"Hi Sofia, we have identified a focused outreach opportunity for Harbour Finance.",2026-07-25 11:05,,
+BKZ-006,Cedar Health,Healthcare,Birmingham,contact@cedar.example,+447700900106,73,New,"Hi Daniel, our lead qualification workflow could help Cedar Health prioritise the right partnerships.",,,
+BKZ-007,Kite Commerce,E-commerce,Edinburgh,sales@kite.example,+447700900107,95,Qualified,"Hi Emma, we see a strong opportunity to accelerate Kite Commerce's outbound pipeline.",2026-07-26 16:20,,
+BKZ-008,Bluefield Logistics,Logistics,Liverpool,ops@bluefield.example,+447700900108,57,Not Interested,"Hi Noah, we prepared a short idea for making Bluefield's prospecting more efficient.",,,

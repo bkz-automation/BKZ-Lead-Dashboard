@@ -1,0 +1,19 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+service_account.json
+gmail_credentials.json
+gmail_token.json
+
+# Python and Streamlit artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.streamlit/secrets.toml
+
+# Local tooling
+.DS_Store
+.idea/
+.vscode/
