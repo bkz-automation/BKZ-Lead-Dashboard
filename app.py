@@ -733,6 +733,18 @@ def gmail_header(payload: dict[str, Any], name: str) -> str:
     return ""
 
 
+def is_valid_email_address(value: str) -> bool:
+    """Perform a conservative validation for an outreach recipient address."""
+    email = str(value).strip()
+    if not email or any(character.isspace() for character in email):
+        return False
+    parsed = parseaddr(email)[1]
+    if parsed.casefold() != email.casefold():
+        return False
+    local_part, separator, domain = email.rpartition("@")
+    return bool(separator and local_part and "." in domain and not domain.startswith("."))
+
+
 def gmail_plain_text(payload: dict[str, Any]) -> str:
     """Extract the text/plain portion of a Gmail payload recursively."""
     if payload.get("mimeType") == "text/plain":
@@ -1215,8 +1227,9 @@ def main() -> None:
                     {"high priority", "qualified"}
                 )
                 & fresh_leads["lead_id"].str.strip().ne("")
-                & fresh_leads["email"].str.strip().ne("")
+                & fresh_leads["email"].map(is_valid_email_address)
                 & fresh_leads["personalised_message"].str.strip().ne("")
+                & fresh_leads["sent_at"].str.strip().eq("")
                 & ~fresh_leads["lead_id"].isin(sent_this_session)
             ]
             if eligible.empty:
@@ -1307,8 +1320,8 @@ def main() -> None:
     with email_col:
         if st.button("✉ Send Email", use_container_width=True):
             try:
-                if not recipient_email:
-                    raise ValueError("The selected lead has no recipient email address.")
+                if not is_valid_email_address(recipient_email):
+                    raise ValueError("This lead does not have a valid email address.")
                 if not outreach_message.strip():
                     raise ValueError("The selected lead has no saved personalised message.")
                 if not sheets_connected:
@@ -1326,19 +1339,20 @@ def main() -> None:
                     raise ValueError(
                         f"Lead {lead['lead_id']} was not found in the refreshed Google Sheet."
                     )
-                fresh_status = str(
-                    fresh_match.iloc[0]["contact_status"]
-                ).strip().casefold()
+                fresh_lead = fresh_match.iloc[0]
+                fresh_recipient = str(fresh_lead["email"]).strip()
+                if not is_valid_email_address(fresh_recipient):
+                    raise ValueError("This lead does not have a valid email address.")
                 sent_lead_ids = set(
                     st.session_state.get("gmail_sent_lead_ids", [])
                 )
                 if (
-                    fresh_status not in {"high priority", "qualified"}
+                    str(fresh_lead["contact_status"]).strip().casefold() == "sent"
+                    or bool(str(fresh_lead["sent_at"]).strip())
                     or str(lead["lead_id"]) in sent_lead_ids
                 ):
-                    raise ValueError(
-                        "This lead is not eligible to send or has already been emailed."
-                    )
+                    raise ValueError("An email has already been sent to this lead.")
+                recipient_email = fresh_recipient
                 gmail_body = email_body_with_opt_out(outreach_message)
                 with st.spinner("Sending email through Gmail..."):
                     send_gmail_email(recipient_email, email_subject, gmail_body)
