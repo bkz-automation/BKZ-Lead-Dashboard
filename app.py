@@ -49,6 +49,9 @@ REQUIRED_COLUMNS = [
     "sent_at",
     "recommended_service",
     "why_good_prospect",
+    "website",
+    "business_description",
+    "automation_opportunity",
     "replied_at",
     "reply_status",
     "reply_summary",
@@ -239,6 +242,9 @@ def analyse_with_groq(api_key: str, lead: pd.Series) -> dict[str, Any]:
     """Send one lead to Groq and return a validated analysis."""
     if not api_key:
         raise ValueError("GROQ_API_KEY is missing. Add it to the local .env file.")
+    lead_payload = lead.to_dict()
+    for field in ("website", "business_description", "automation_opportunity"):
+        lead_payload[field] = str(lead.get(field, ""))
     prompt = f"""Analyse this business lead for BKZ and return raw JSON only.
 Do not use Markdown, commentary, or code fences. Use exactly these fields:
 {{"leadScore": <integer 1 to 10, never 0>,
@@ -259,11 +265,27 @@ The qualification must exactly match the leadScore:
 - 1 to 3: "low_priority"
 Never reject a lead. Scores 4 or 5 must always be "manual_review".
 
+Evaluate the leadScore using balanced evidence from:
+- the company name, industry, location, and other available company information;
+- the website value and whether it appears usable;
+- the business description;
+- the identified automation opportunity;
+- the availability of public email and phone contact details;
+- the company's realistic fit with BKZ services.
+
+Missing information reduces confidence but must not automatically produce a score of 1/10.
+If the lead has a usable website, public contact details, a clear business description, and a
+realistic automation opportunity, it should normally score at least 4 unless the supplied data
+contains a clear, specific reason for a lower score. The qualification must always match the
+score range exactly.
+
 Requirements for "personalisedMessage":
 - Write in professional, natural French.
 - Write between 100 and 160 words.
 - Address the company by its actual name.
 - Mention its industry and location when those values are available in the lead data.
+- Use the website, business description, and automation opportunity when available to make the
+  message specific and relevant. Do not claim to have visited or verified the website.
 - Identify one likely operational or commercial problem based only on the available lead data.
   Present it as a likely challenge rather than an established fact.
 - Recommend one specific BKZ service from the service list that fits the company, and use the
@@ -279,7 +301,7 @@ Requirements for "personalisedMessage":
 Base "whyGoodProspect" only on the supplied lead data. Keep every JSON field as a JSON string
 where required and escape line breaks inside "personalisedMessage" correctly.
 
-Lead data: {json.dumps(lead.to_dict(), ensure_ascii=False)}"""
+Lead data: {json.dumps(lead_payload, ensure_ascii=False)}"""
     try:
         response = requests.post(
             GROQ_API_URL,
@@ -910,6 +932,9 @@ def main() -> None:
         column_config={
             "score": st.column_config.ProgressColumn("score", min_value=1, max_value=10, format="%d"),
             "personalised_message": st.column_config.TextColumn("personalised_message", width="large"),
+            "website": st.column_config.TextColumn("website", width="medium"),
+            "business_description": st.column_config.TextColumn("business_description", width="large"),
+            "automation_opportunity": st.column_config.TextColumn("automation_opportunity", width="large"),
         },
     )
 
