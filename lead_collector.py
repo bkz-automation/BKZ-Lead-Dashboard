@@ -2073,7 +2073,7 @@ def collect(settings: Settings) -> int:
                 results.extend(parsed[:remaining])
                 logging.info("Source parsed: %s | businesses=%d", source_name, len(parsed[:remaining]))
             logging.info("Source discovery completed: %s / %s (%d businesses)", sector, city, len(results))
-            if sector_timed_out or time.monotonic() - sector_started >= 20.0:
+            if (sector_timed_out or time.monotonic() - sector_started >= 20.0) and not results:
                 skipped_empty_sectors += 1
                 logging.info("Sector exceeded 20 seconds and was skipped: %s | City: %s", sector, city)
                 logging.info("Sector duration: %.2f seconds | %s | %s", time.monotonic() - sector_started, sector, city)
