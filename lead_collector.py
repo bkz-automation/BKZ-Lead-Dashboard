@@ -1271,12 +1271,17 @@ def apply_directory_fallbacks(
         source for source in client.settings.sources
         if source in {"pages_maroc", "maroc_annuaire", "pj_ma"} and source != primary_source
     ]
-    for fallback_name in fallback_names:
+    for fallback_index, fallback_name in enumerate(fallback_names):
         if (
             fallback_name == primary_source or fallback_name in disabled_sources
-            or client.sector_seconds_remaining() < 2.0
         ):
             continue
+        remaining_sources = len(fallback_names) - fallback_index
+        remaining_budget = client.sector_seconds_remaining()
+        if remaining_budget < 2.0:
+            break
+        original_deadline = client.sector_deadline
+        client.sector_deadline = time.monotonic() + max(2.0, remaining_budget / remaining_sources)
         logging.info("Fallback source attempted: %s | %s | %s", fallback_name, sector, city)
         try:
             candidates = SOURCE_ADAPTERS[fallback_name](client, sector, city, min(5, limit))
@@ -1286,11 +1291,13 @@ def apply_directory_fallbacks(
             logging.warning("Fallback source access failed: %s: %s", fallback_name, exc)
             continue
         except SectorTimeout:
-            logging.debug("Fallback enrichment stopped at sector deadline")
-            break
+            logging.debug("Fallback source reached its allocated enrichment budget: %s", fallback_name)
+            continue
         except RuntimeError as exc:
             logging.debug("Fallback source unavailable from %s: %s", fallback_name, exc)
             continue
+        finally:
+            client.sector_deadline = original_deadline
         for index, entry in enumerate(enriched):
             matches = [candidate for candidate in candidates if (
                 directory_location_valid(candidate.get("location", ""), city)
@@ -1378,6 +1385,9 @@ def execute_source_pipeline(
         else client.osm_businesses_discovered if source_name == "osm_overpass"
         else len(parsed[:candidate_limit])
     )
+    # Discovery has its own bounded window.  Once candidates exist, give them a
+    # separate bounded enrichment window so fallback adapters are not starved.
+    client.start_sector_timer(20.0)
     for item in parsed[:candidate_limit]:
         logging.info("Primary candidate retained for enrichment: %s", item.get("company_name", ""))
     parsed, candidates_enriched, failed_sources, successful_sources = apply_directory_fallbacks(
@@ -2004,7 +2014,7 @@ def collect(settings: Settings) -> int:
                             pipeline_failed_sources, pipeline_successful_sources,
                             pipeline_text_requests, pipeline_detail_requests,
                             pipeline_overpass_requests, pipeline_osm_discovered,
-                        ) = future.result(timeout=20)
+                        ) = future.result(timeout=40)
                     else:
                         (
                             parsed, pipeline_rejected, pipeline_discovered, pipeline_enriched,
