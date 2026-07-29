@@ -39,6 +39,10 @@ SHEET_COLUMNS = [
     "website", "business_description", "automation_opportunity", "score",
     "contact_status", "personalised_message", "sent_at",
 ]
+OPTIONAL_LEAD_COLUMNS = [
+    "ai_buying_score", "recommended_service", "website_status", "facebook_url",
+    "instagram_url", "linkedin_url", "contact_quality",
+]
 
 DEFAULT_CITIES = ["Agadir", "Casablanca", "Marrakech"]
 
@@ -73,7 +77,8 @@ SPREADSHEET_ID = "1V4sKtbuJQy-9fMhg3GHyS16BcYW6A0Euheew8FutMvc"
 # it is the most stable, but a business absent from OSM can now still be discovered
 # by a Moroccan directory during the same run.  Google Places remains opt-in because
 # it requires a billed API key and is governed by separate platform terms.
-DEFAULT_SOURCES = ["osm_overpass", "pages_maroc", "maroc_annuaire", "pj_ma"]
+SOURCE_PRIORITY = ["pages_maroc", "pj_ma", "maroc_annuaire", "google_places", "osm_overpass"]
+DEFAULT_SOURCES = ["pages_maroc", "pj_ma", "maroc_annuaire", "osm_overpass"]
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -217,6 +222,7 @@ def load_settings(
             f"Unknown sources: {', '.join(invalid_sources)}. "
             f"Available sources: {', '.join(SOURCE_ADAPTERS)}"
         )
+    sources = sorted(dict.fromkeys(sources), key=SOURCE_PRIORITY.index)
     return Settings(
         cities=cities,
         sectors=prioritize_sectors(sectors_override or csv_setting("LEAD_SECTORS", DEFAULT_SECTORS)),
@@ -424,14 +430,19 @@ class PublicWebClient:
         website_deadline = time.monotonic() + 8.0
         self.sector_deadline = min(original_deadline, website_deadline) if original_deadline else website_deadline
         try:
+            logging.info("Website visited: %s", website)
             soup, response = self.fetch_soup(website)
         except SectorTimeout as exc:
             logging.debug("Website enrichment reached its 8-second budget for %s: %s", website, exc)
             self.sector_deadline = original_deadline
+            result = dict(result)
+            result["website_status"] = "timeout"
             return directory_lead_to_sheet(result, sector, city)
         except RuntimeError as exc:
             logging.warning("Official website inaccessible; keeping directory data %s: %s", website, exc)
             self.sector_deadline = original_deadline
+            result = dict(result)
+            result["website_status"] = "unreachable"
             return directory_lead_to_sheet(result, sector, city)
         try:
             for node in soup(["script", "style", "noscript", "svg"]):
@@ -452,24 +463,27 @@ class PublicWebClient:
             if whatsapp_phone:
                 logging.info("Explicit WhatsApp found: %s | %s", result.get("company_name", ""), whatsapp_phone)
                 logging.info("Mobile found: %s | %s", result.get("company_name", ""), whatsapp_phone)
+            if result["email"]:
+                logging.info("Emails found: %s | homepage", result.get("company_name", ""))
+            if page_phone:
+                logging.info("Phones found: %s | homepage", result.get("company_name", ""))
             result["website"] = canonical_url(response.url)
+            result["website_status"] = "active"
+            result.update(extract_social_media_links(soup, response.url))
             result["business_description"] = extract_description(soup, description, sector, city)
-            needs_more_contact = (
-                not result["email"]
-                or classify_moroccan_phone(result["phone"]) != "mobile"
-                or not result["whatsapp_confirmed"]
-            )
-            if needs_more_contact:
-                # Contact information is commonly split across a contact page, an
-                # about page, and a legal/footer page.  Keep this bounded so one
-                # slow site cannot consume the sector budget.
-                for internal_url in candidate_internal_pages(soup, response.url)[:3]:
+            # Contact information is commonly split across a contact page, an
+            # about page, and a legal/footer page. Keep this bounded so one slow
+            # site cannot consume the sector budget, but attempt these pages even
+            # when the homepage already has a valid contact method.
+            if website:
+                for internal_url in candidate_internal_pages(soup, response.url)[:10]:
                     if time.monotonic() >= website_deadline:
                         break
                     try:
                         internal_soup, _ = self.fetch_soup(internal_url)
                     except (RuntimeError, SectorTimeout):
                         continue
+                    logging.info("Page crawled: %s", internal_url)
                     internal_text = clean_text(internal_soup.get_text(" ", strip=True))
                     result["email"] = result["email"] or preferred_public_email(
                         internal_soup, internal_text, response.url
@@ -485,6 +499,10 @@ class PublicWebClient:
                         and classify_moroccan_phone(internal_phone) == "mobile"
                     ):
                         result["phone"] = internal_phone
+                    if result["email"]:
+                        logging.info("Emails found: %s | %s", result.get("company_name", ""), internal_url)
+                    if internal_phone:
+                        logging.info("Phones found: %s | %s", result.get("company_name", ""), internal_url)
                     if result["email"] and result["whatsapp_confirmed"]:
                         break
             return directory_lead_to_sheet(result, sector, city)
@@ -495,6 +513,23 @@ class PublicWebClient:
 def clean_text(value: str, limit: int | None = None) -> str:
     value = re.sub(r"\s+", " ", html.unescape(value or "")).strip()
     return value[:limit].rstrip() if limit else value
+
+
+def extract_social_media_links(soup: BeautifulSoup, page_url: str) -> dict[str, str]:
+    """Return public business social profile URLs found on an official site."""
+    profiles = {"facebook_url": "", "instagram_url": "", "linkedin_url": ""}
+    hosts = {
+        "facebook_url": {"facebook.com", "fb.com"},
+        "instagram_url": {"instagram.com"},
+        "linkedin_url": {"linkedin.com"},
+    }
+    for link in soup.select("a[href]"):
+        url = urljoin(page_url, link.get("href", "").strip())
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+        for field, accepted_hosts in hosts.items():
+            if not profiles[field] and any(host == item or host.endswith("." + item) for item in accepted_hosts):
+                profiles[field] = canonical_url(url)
+    return profiles
 
 
 def valid_location(text: str, url: str, city: str) -> bool:
@@ -1064,10 +1099,13 @@ def explicit_whatsapp_from_soup(soup: BeautifulSoup) -> str:
     values: list[str] = []
     for link in soup.select("a[href]"):
         href = link.get("href", "")
-        label = normalise_text(link.get_text(" ", strip=True))
         host = (urlparse(href).hostname or "").lower().removeprefix("www.")
-        if host in {"wa.me", "api.whatsapp.com", "web.whatsapp.com", "whatsapp.com"} or "whatsapp" in label:
+        if host in {"wa.me", "api.whatsapp.com", "web.whatsapp.com", "whatsapp.com"}:
             values.append(href)
+    for value in structured_contact_values(soup)["urls"]:
+        host = (urlparse(value).hostname or "").lower().removeprefix("www.")
+        if host in {"wa.me", "api.whatsapp.com", "web.whatsapp.com", "whatsapp.com"}:
+            values.append(value)
     return explicit_whatsapp_number(values)
 
 
@@ -1343,6 +1381,13 @@ def directory_lead_to_sheet(result: dict[str, str], sector: str, city: str) -> d
         "website": website,
         "business_description": description,
         "automation_opportunity": result.get("automation_opportunity", "") or automation_opportunity(sector),
+        "ai_buying_score": result.get("ai_buying_score", ""),
+        "recommended_service": result.get("recommended_service", ""),
+        "website_status": result.get("website_status", "active" if website else "not_found"),
+        "facebook_url": result.get("facebook_url", ""),
+        "instagram_url": result.get("instagram_url", ""),
+        "linkedin_url": result.get("linkedin_url", ""),
+        "contact_quality": result.get("contact_quality", ""),
         "score": "",
         "contact_status": "Not Contacted",
         "personalised_message": "",
@@ -1427,6 +1472,7 @@ def execute_source_pipeline(
         if not lead:
             continue
         lead = apply_phone_policy(lead, settings.allow_landlines)
+        lead = qualify_ai_prospect(lead, sector)
         classification = lead.get("_phone_classification")
         accepted_contact = bool(lead.get("email")) or classification == "mobile" or bool(lead.get("whatsapp_confirmed"))
         if settings.allow_landlines and classification == "landline":
@@ -1444,6 +1490,7 @@ def execute_source_pipeline(
             rejected_no_mobile_email += 1
             logging.info("Lead rejected after all enrichment sources exhausted: %s", lead.get("company_name", ""))
             logging.info("Lead rejected: %s", lead.get("company_name", ""))
+            logging.info("Rejection reason: %s | no mobile, explicit WhatsApp, or public email", lead.get("company_name", ""))
             logging.debug("Candidate name=%r rejected reason=no mobile or public email", lead.get("company_name", ""))
 
     def priority(lead: dict[str, str]) -> int:
@@ -1496,6 +1543,34 @@ def deobfuscate_public_email_text(text: str) -> str:
     return text
 
 
+def structured_contact_values(soup: BeautifulSoup) -> dict[str, list[str]]:
+    """Collect public contact fields from JSON-LD/schema.org blocks."""
+    values = {"emails": [], "phones": [], "urls": []}
+    for node in soup.select('script[type="application/ld+json"]'):
+        try:
+            payload = json.loads(node.string or node.get_text())
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        stack = [payload]
+        while stack:
+            value = stack.pop()
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    normalized = key.casefold()
+                    if isinstance(child, str):
+                        if normalized in {"email"}:
+                            values["emails"].append(child)
+                        elif normalized in {"telephone", "phone"}:
+                            values["phones"].append(child)
+                        elif normalized in {"url", "sameas"}:
+                            values["urls"].append(child)
+                    elif isinstance(child, (dict, list)):
+                        stack.append(child)
+            elif isinstance(value, list):
+                stack.extend(value)
+    return values
+
+
 def moroccan_phone_matches(text: str) -> list[str]:
     return PHONE_RE.findall(str(text or "").translate(MOROCCAN_DIGIT_TRANSLATION))
 
@@ -1506,6 +1581,11 @@ def public_email_candidates(soup: BeautifulSoup, text: str) -> list[str]:
         candidates.append(link.get("href", "")[7:].split("?", 1)[0])
     candidates.extend(cloudflare_email(node.get("data-cfemail", "")) for node in soup.select("[data-cfemail]"))
     candidates.extend(EMAIL_RE.findall(deobfuscate_public_email_text(text)))
+    structured = structured_contact_values(soup)
+    candidates.extend(structured["emails"])
+    script_text = " ".join(node.get_text(" ", strip=True) for node in soup.select("script"))
+    script_text = re.sub(r"(['\"])\s*\+\s*\1", "", script_text)
+    candidates.extend(EMAIL_RE.findall(deobfuscate_public_email_text(script_text)))
     valid: list[str] = []
     rejected_domains = {"example.com", "sentry.io", "wixpress.com", "cloudflare.com"}
     for value in candidates:
@@ -1534,8 +1614,9 @@ def preferred_public_email(soup: BeautifulSoup, text: str, website: str) -> str:
 
 def candidate_internal_pages(soup: BeautifulSoup, homepage_url: str) -> list[str]:
     fallback_paths = [
-        "/contact", "/nous-contacter", "/contactez-nous", "/contact-us",
-        "/fr/contact", "/a-propos", "/qui-sommes-nous", "/mentions-legales",
+        "/contact", "/contact-us", "/contactez-nous", "/nous-contacter", "/fr/contact",
+        "/about", "/about-us", "/a-propos", "/qui-sommes-nous", "/mentions-legales",
+        "/legal", "/privacy", "/privacy-policy",
     ]
     contact_markers = (
         "contact", "nous contacter", "contactez", "coordonnees", "coordonnees",
@@ -1571,6 +1652,7 @@ def first_moroccan_phone(soup: BeautifulSoup, text: str) -> str:
     for link in soup.select('a[href^="tel:"]'):
         candidates.append(link.get("href", "")[4:])
     candidates.extend(moroccan_phone_matches(text))
+    candidates.extend(structured_contact_values(soup)["phones"])
     return preferred_moroccan_phone(candidates)
 
 
@@ -1618,6 +1700,63 @@ def automation_opportunity(sector: str) -> str:
     if any(word in key for word in ("boutique", "magasin", "bijouter", "opticien", "grossiste", "distributeur", "supermarche")):
         return "Automatiser les demandes produits, le suivi des commandes et la fidélisation client."
     return "Automatiser la qualification des prospects, les devis, rendez-vous et relances clients."
+
+
+def recommended_service_for_sector(sector: str) -> str:
+    key = normalise_text(sector)
+    if any(word in key for word in ("restaurant", "cafe", "traiteur")):
+        return "AI WhatsApp Ordering"
+    if any(word in key for word in ("hotel", "riad", "hote")):
+        return "AI Reservation Assistant"
+    if any(word in key for word in ("clinique", "medical", "dentaire", "radiologie", "laboratoire", "veterinaire")):
+        return "AI Receptionist"
+    if any(word in key for word in ("immobili", "agence immobili")):
+        return "AI Lead Qualification"
+    if any(word in key for word in ("ecole", "formation", "creche", "auto ecole")):
+        return "AI Admissions Assistant"
+    if any(word in key for word in ("salle", "fitness", "sport")):
+        return "AI Membership Assistant"
+    if any(word in key for word in ("coiffure", "beaute", "spa", "esthet")):
+        return "AI Booking Assistant"
+    if any(word in key for word in ("comptable", "avocat")):
+        return "AI Client Intake Assistant"
+    return "AI Lead Qualification Assistant"
+
+
+def qualify_ai_prospect(lead: dict[str, str], sector: str) -> dict[str, str]:
+    """Add transparent, deterministic AI-prospect signals to an accepted lead."""
+    lead = dict(lead)
+    mobile = lead.get("_phone_classification") == "mobile"
+    whatsapp = bool(lead.get("whatsapp_confirmed"))
+    website = bool(lead.get("website"))
+    email = bool(lead.get("email"))
+    social_count = sum(bool(lead.get(field)) for field in ("facebook_url", "instagram_url", "linkedin_url"))
+    score = (
+        20 * website + 20 * email + 20 * mobile + 15 * whatsapp
+        + 5 * bool(lead.get("facebook_url")) + 5 * bool(lead.get("instagram_url"))
+        + 5 * bool(lead.get("linkedin_url")) + 5 * (lead.get("website_status") == "active")
+    )
+    lead["ai_buying_score"] = str(min(100, score))
+    lead["recommended_service"] = recommended_service_for_sector(sector)
+    contact_methods = sum((email, mobile, whatsapp))
+    lead["contact_quality"] = "high" if contact_methods >= 2 else "standard"
+    reasons = []
+    if website:
+        reasons.append("official website")
+    if email:
+        reasons.append("business email")
+    if mobile:
+        reasons.append("mobile contact")
+    if whatsapp:
+        reasons.append("WhatsApp")
+    if social_count:
+        reasons.append("active social presence")
+    rationale = ", ".join(reasons) or "a public business contact method"
+    lead["business_description"] = clean_text(
+        f"{lead.get('business_description', '')} AI prospect: reachable through {rationale}; "
+        f"recommended service: {lead['recommended_service']}.", 450
+    )
+    return lead
 
 
 def make_lead_id(name: str, phone: str, website: str) -> str:
@@ -1716,6 +1855,9 @@ def write_new_leads(
         row = [""] * len(worksheet_headers)
         for column in SHEET_COLUMNS:
             row[header_positions[column]] = str(lead.get(column, defaults.get(column, "")))
+        for column in OPTIONAL_LEAD_COLUMNS:
+            if column in header_positions:
+                row[header_positions[column]] = str(lead.get(column, ""))
         rows.append(row)
     if any(len(row) != len(worksheet_headers) for row in rows):
         raise RuntimeError("Generated lead row width does not match worksheet headers; no rows were written")
@@ -2147,10 +2289,21 @@ def collect(settings: Settings) -> int:
         bool(lead.get("email")) and lead.get("_phone_classification") != "mobile"
         for lead in new_leads
     )
+    average_ai_buying_score = (
+        sum(int(lead.get("ai_buying_score") or 0) for lead in new_leads) / len(new_leads)
+        if new_leads else 0.0
+    )
     logging.info("Leads with website: %d", leads_with_website)
     logging.info("Leads with email: %d", leads_with_email)
     logging.info("Leads with mobile: %d", leads_with_mobile)
     logging.info("Leads with confirmed WhatsApp: %d", leads_with_confirmed_whatsapp)
+    logging.info("Businesses with website: %d", leads_with_website)
+    logging.info("Businesses with email: %d", leads_with_email)
+    logging.info("Businesses with mobile: %d", leads_with_mobile)
+    logging.info("Businesses with WhatsApp: %d", leads_with_confirmed_whatsapp)
+    logging.info("Businesses qualified: %d", len(new_leads))
+    logging.info("Businesses rejected: %d", rejected_no_mobile_email)
+    logging.info("Average AI buying score: %.1f", average_ai_buying_score)
     logging.info("Leads with landline only: %d", leads_with_landline_only)
     logging.info("Leads with email only: %d", leads_with_email_only)
     logging.info("Leads rejected after full enrichment: %d", rejected_no_mobile_email)
