@@ -454,7 +454,10 @@ class PublicWebClient:
                 or not result["whatsapp_confirmed"]
             )
             if needs_more_contact:
-                for internal_url in candidate_internal_pages(soup, response.url)[:2]:
+                # Contact information is commonly split across a contact page, an
+                # about page, and a legal/footer page.  Keep this bounded so one
+                # slow site cannot consume the sector budget.
+                for internal_url in candidate_internal_pages(soup, response.url)[:3]:
                     if time.monotonic() >= website_deadline:
                         break
                     try:
@@ -1494,19 +1497,33 @@ def preferred_public_email(soup: BeautifulSoup, text: str, website: str) -> str:
 
 
 def candidate_internal_pages(soup: BeautifulSoup, homepage_url: str) -> list[str]:
-    allowed_paths = ["/contact", "/contact-us", "/nous-contacter", "/a-propos", "/mentions-legales"]
+    fallback_paths = [
+        "/contact", "/nous-contacter", "/contactez-nous", "/contact-us",
+        "/fr/contact", "/a-propos", "/qui-sommes-nous", "/mentions-legales",
+    ]
+    contact_markers = (
+        "contact", "nous contacter", "contactez", "coordonnees", "coordonnees",
+        "whatsapp", "telephone", "tel", "email", "ecrire",
+    )
     homepage_host = (urlparse(homepage_url).hostname or "").lower().removeprefix("www.")
-    found: list[str] = []
+    scored: dict[str, int] = {}
     for link in soup.select("a[href]"):
         url = urljoin(homepage_url, link.get("href", ""))
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower().removeprefix("www.")
         path = parsed.path.rstrip("/").lower() or "/"
-        if parsed.scheme in {"http", "https"} and host == homepage_host and path in allowed_paths:
+        if parsed.scheme not in {"http", "https"} or host != homepage_host:
+            continue
+        if re.search(r"\.(?:pdf|jpg|jpeg|png|gif|webp|zip)(?:$|\?)", path, re.I):
+            continue
+        label = normalise_text(link.get_text(" ", strip=True))
+        evidence = f"{label} {normalise_text(path)}"
+        score = sum(marker in evidence for marker in contact_markers)
+        if score:
             normalized = canonical_url(url)
-            if normalized not in found:
-                found.append(normalized)
-    for path in allowed_paths:
+            scored[normalized] = max(scored.get(normalized, 0), score)
+    found = [url for url, _ in sorted(scored.items(), key=lambda item: (-item[1], item[0]))]
+    for path in fallback_paths:
         url = canonical_url(urljoin(homepage_url, path))
         if url not in found:
             found.append(url)
@@ -2210,6 +2227,15 @@ def run_mocked_osm_tests() -> int:
         '<html><body>Agadir Maroc <a href="https://wa.me/212612345678">WhatsApp</a>'
         '<a href="mailto:contact@example.ma">Email</a></body></html>', "html.parser"
     )
+    contact_navigation = BeautifulSoup(
+        '<html><body><a href="/products">Produits</a>'
+        '<a href="/contactez-nous">Contactez-nous</a>'
+        '<a href="/mentions-legales">Mentions légales</a></body></html>',
+        "html.parser",
+    )
+    internal_pages = candidate_internal_pages(contact_navigation, "https://example.ma")
+    assert internal_pages[0] == "https://example.ma/contactez-nous"
+    assert "https://example.ma/contact" in internal_pages
     website_client = PublicWebClient.__new__(PublicWebClient)
     website_client.sector_deadline = None
     website_client.fetch_soup = lambda url, **kwargs: (homepage, FakeResponse({}, url))  # type: ignore[method-assign]
