@@ -1675,36 +1675,35 @@ def read_existing(worksheet: gspread.Worksheet) -> tuple[list[dict[str, str]], l
 def write_new_leads(
     worksheet: gspread.Worksheet,
     leads: list[dict[str, str]],
+    worksheet_headers: list[str],
 ) -> None:
     if not leads:
         return
-    rows = [
-        [
-            lead.get("lead_id", ""),                  # A
-            lead.get("company_name", ""),             # B
-            lead.get("industry", ""),                 # C
-            lead.get("location", ""),                 # D
-            lead.get("email", ""),                    # E
-            lead.get("phone", ""),                    # F
-            "",                                         # G score
-            "Not Contacted",                            # H contact_status
-            "",                                         # I personalised_message
-            "",                                         # J sent_at
-            "",                                         # K recommended_service
-            "",                                         # L why_good_prospect
-            "",                                         # M replied_at
-            "",                                         # N reply_status
-            "",                                         # O reply_summary
-            "",                                         # P gmail_message_id
-            "",                                         # Q intentionally blank
-            lead.get("website", ""),                   # R
-            lead.get("business_description", ""),       # S
-            lead.get("automation_opportunity", ""),     # T
-        ]
-        for lead in leads
-    ]
-    if any(len(row) != 20 for row in rows):
-        raise RuntimeError("Generated lead row is not exactly 20 cells; no rows were written")
+    header_positions: dict[str, int] = {}
+    for index, header in enumerate(worksheet_headers):
+        normalized = normalise_sheet_header(header)
+        if normalized and normalized not in header_positions:
+            header_positions[normalized] = index
+    missing = [column for column in SHEET_COLUMNS if column not in header_positions]
+    if missing:
+        raise ValueError(
+            "Required worksheet headers missing: " + ", ".join(missing) + ". No rows were written."
+        )
+
+    defaults = {
+        "score": "",
+        "contact_status": "Not Contacted",
+        "personalised_message": "",
+        "sent_at": "",
+    }
+    rows: list[list[str]] = []
+    for lead in leads:
+        row = [""] * len(worksheet_headers)
+        for column in SHEET_COLUMNS:
+            row[header_positions[column]] = str(lead.get(column, defaults.get(column, "")))
+        rows.append(row)
+    if any(len(row) != len(worksheet_headers) for row in rows):
+        raise RuntimeError("Generated lead row width does not match worksheet headers; no rows were written")
 
     column_a = worksheet.col_values(1)
     last_non_empty_row = max(
@@ -1713,7 +1712,7 @@ def write_new_leads(
     )
     next_row = last_non_empty_row + 1
     end_row = next_row + len(rows) - 1
-    target_range = f"A{next_row}:T{end_row}"
+    target_range = f"A{next_row}:{excel_column_name(len(worksheet_headers))}{end_row}"
     logging.info("Google Sheets next_row=%d", next_row)
     logging.info("Google Sheets target range=%s", target_range)
     logging.info("Google Sheets first row preview=%r", rows[0])
@@ -2104,7 +2103,7 @@ def collect(settings: Settings) -> int:
 
     if worksheet is not None and new_leads:
         try:
-            write_new_leads(worksheet, new_leads)
+            write_new_leads(worksheet, new_leads, worksheet_headers)
         except Exception as exc:
             raise RuntimeError(f"Google Sheets explicit A:T write failed: {exc}") from exc
     logging.info("Run summary: source searches completed=%d, leads found=%d, duplicates removed=%d, leads appended=%d",
@@ -2268,6 +2267,38 @@ def run_mocked_osm_tests() -> int:
     assert preferred_moroccan_phone(["٠٧ ١٢ ٣٤ ٥٦ ٧٨"]) == "+212712345678"
     assert explicit_whatsapp_number(["whatsapp://send?phone=212612345678"]) == "+212612345678"
     assert explicit_whatsapp_number(["https://web.whatsapp.com/send?phone=212712345678"]) == "+212712345678"
+
+    class FakeWorksheet:
+        def __init__(self) -> None:
+            self.updated_rows: list[list[str]] = []
+            self.updated_range = ""
+
+        def col_values(self, column: int) -> list[str]:
+            assert column == 1
+            return ["lead_id"]
+
+        def update(self, rows: list[list[str]], range_name: str, value_input_option: str) -> None:
+            assert value_input_option == "RAW"
+            self.updated_rows = rows
+            self.updated_range = range_name
+
+    reordered_headers = [
+        "lead_id", "company_name", "industry", "location", "email", "phone", "website",
+        "score", "contact_status", "personalised_message", "sent_at", "recommended_service",
+        "why_good_prospect", "replied_at", "reply_status", "reply_summary", "gmail_message_id",
+        "", "business_description", "automation_opportunity",
+    ]
+    fake_worksheet = FakeWorksheet()
+    write_new_leads(fake_worksheet, [{
+        "lead_id": "lead_test", "company_name": "Example", "industry": "restaurants",
+        "location": "Agadir, Morocco", "email": "contact@example.ma", "phone": "+212612345678",
+        "website": "https://example.ma", "business_description": "Public business description.",
+        "automation_opportunity": "Public automation opportunity.",
+    }], reordered_headers)  # type: ignore[arg-type]
+    assert fake_worksheet.updated_range == "A2:T2"
+    assert fake_worksheet.updated_rows[0][6] == "https://example.ma"
+    assert fake_worksheet.updated_rows[0][18] == "Public business description."
+    assert fake_worksheet.updated_rows[0][19] == "Public automation opportunity."
     website_client = PublicWebClient.__new__(PublicWebClient)
     website_client.sector_deadline = None
     website_client.fetch_soup = lambda url, **kwargs: (homepage, FakeResponse({}, url))  # type: ignore[method-assign]
