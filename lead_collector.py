@@ -82,6 +82,7 @@ OVERPASS_ENDPOINTS = [
 ]
 OVERPASS_AREA_CACHE: dict[str, int] = {}
 OVERPASS_RUN_REQUESTS = 0
+SECTOR_TIMEOUT_SECONDS = 60.0
 
 OSM_SECTOR_TAGS: dict[str, list[tuple[str, str]]] = {
     "restaurants": [("amenity", "restaurant")],
@@ -354,7 +355,7 @@ class PublicWebClient:
         self.last_overpass_endpoint = ""
         self.last_overpass_status = 0
 
-    def start_sector_timer(self, seconds: float = 20.0) -> None:
+    def start_sector_timer(self, seconds: float = SECTOR_TIMEOUT_SECONDS) -> None:
         self.sector_deadline = time.monotonic() + seconds
 
     def clear_sector_timer(self) -> None:
@@ -370,18 +371,20 @@ class PublicWebClient:
         raise_for_status = bool(kwargs.pop("_raise_for_status", True))
         budget = self.sector_seconds_remaining()
         if budget <= 0:
-            raise SectorTimeout("Sector exceeded its 20-second hard timeout")
+            raise SectorTimeout(f"Sector exceeded its {SECTOR_TIMEOUT_SECONDS:g}-second hard timeout")
         target_delay = random.uniform(self.settings.delay_min, self.settings.delay_max)
         if self.settings.fast_mode:
             target_delay = min(target_delay, 0.5)
         remaining = target_delay - (time.monotonic() - self._last_request)
         if remaining > 0:
             if remaining >= budget:
-                raise SectorTimeout("Sector exceeded its 20-second hard timeout during request delay")
+                raise SectorTimeout(
+                    f"Sector exceeded its {SECTOR_TIMEOUT_SECONDS:g}-second hard timeout during request delay"
+                )
             time.sleep(remaining)
         budget = self.sector_seconds_remaining()
         if budget <= 0:
-            raise SectorTimeout("Sector exceeded its 20-second hard timeout")
+            raise SectorTimeout(f"Sector exceeded its {SECTOR_TIMEOUT_SECONDS:g}-second hard timeout")
         if requested_timeout:
             connect_timeout, read_timeout = map(float, requested_timeout)
         else:
@@ -401,7 +404,7 @@ class PublicWebClient:
         except requests.RequestException as exc:
             self._last_request = time.monotonic()
             if self.sector_seconds_remaining() <= 0:
-                raise SectorTimeout("Sector exceeded its 20-second hard timeout") from exc
+                raise SectorTimeout(f"Sector exceeded its {SECTOR_TIMEOUT_SECONDS:g}-second hard timeout") from exc
             raise RuntimeError(f"Request failed for {url}: {exc}") from exc
 
     def fetch_soup(self, url: str, **kwargs: object) -> tuple[BeautifulSoup, requests.Response]:
@@ -730,7 +733,9 @@ def crawl_directory_pages(
     detailed: list[dict[str, str]] = []
     for entry in entries[:limit]:
         if client.sector_seconds_remaining() <= 0:
-            raise SectorTimeout("Sector exceeded its 20-second hard timeout before detail enrichment")
+            raise SectorTimeout(
+                f"Sector exceeded its {SECTOR_TIMEOUT_SECONDS:g}-second hard timeout before detail enrichment"
+            )
         detailed.append(parse_directory_detail(client, entry))
     return detailed
 
@@ -1374,7 +1379,7 @@ def execute_source_pipeline(
 ) -> tuple[list[dict[str, str]], int, int, int, set[str], set[str], int, int, int, int]:
     """Run all network access and parsing for one source inside a timed worker."""
     client = PublicWebClient(settings)
-    client.start_sector_timer(60.0)
+    client.start_sector_timer(SECTOR_TIMEOUT_SECONDS)
     accepted_limit = min(5, limit) if source_name == "osm_overpass" else limit
     candidate_limit = min(20, max(accepted_limit, 20)) if source_name == "osm_overpass" else min(
         20 if source_name == "google_places" else 5, limit
@@ -1387,7 +1392,7 @@ def execute_source_pipeline(
     )
     # Discovery has its own bounded window.  Once candidates exist, give them a
     # separate bounded enrichment window so fallback adapters are not starved.
-    client.start_sector_timer(60.0)
+    client.start_sector_timer(SECTOR_TIMEOUT_SECONDS)
     for item in parsed[:candidate_limit]:
         logging.info("Primary candidate retained for enrichment: %s", item.get("company_name", ""))
     parsed, candidates_enriched, failed_sources, successful_sources = apply_directory_fallbacks(
@@ -2014,25 +2019,29 @@ def collect(settings: Settings) -> int:
                             pipeline_failed_sources, pipeline_successful_sources,
                             pipeline_text_requests, pipeline_detail_requests,
                             pipeline_overpass_requests, pipeline_osm_discovered,
-                        ) = future.result(timeout=40)
+                        ) = future.result(timeout=SECTOR_TIMEOUT_SECONDS * 2)
                     else:
                         (
                             parsed, pipeline_rejected, pipeline_discovered, pipeline_enriched,
                             pipeline_failed_sources, pipeline_successful_sources,
                             pipeline_text_requests, pipeline_detail_requests,
                             pipeline_overpass_requests, pipeline_osm_discovered,
-                        ) = future.result(timeout=max(0.1, 20.0 - (time.monotonic() - sector_started)))
+                        ) = future.result(timeout=max(
+                            0.1, SECTOR_TIMEOUT_SECONDS - (time.monotonic() - sector_started)
+                        ))
                 except concurrent.futures.TimeoutError:
                     future.cancel()
                     sector_timed_out = True
                     parsed = []
                     source_timeout_failure = True
-                    logging.warning("Sector hard timeout reached after 20 seconds")
+                    logging.warning("Sector hard timeout reached after %.0f seconds", SECTOR_TIMEOUT_SECONDS)
                 except SectorTimeout as exc:
                     sector_timed_out = True
                     parsed = []
                     source_timeout_failure = True
-                    logging.warning("Sector hard timeout reached after 20 seconds: %s", exc)
+                    logging.warning(
+                        "Sector hard timeout reached after %.0f seconds: %s", SECTOR_TIMEOUT_SECONDS, exc
+                    )
                 except SourceAccessError as exc:
                     parsed = []
                     source_timeout_failure = True
@@ -2073,9 +2082,12 @@ def collect(settings: Settings) -> int:
                 results.extend(parsed[:remaining])
                 logging.info("Source parsed: %s | businesses=%d", source_name, len(parsed[:remaining]))
             logging.info("Source discovery completed: %s / %s (%d businesses)", sector, city, len(results))
-            if (sector_timed_out or time.monotonic() - sector_started >= 20.0) and not results:
+            if (sector_timed_out or time.monotonic() - sector_started >= SECTOR_TIMEOUT_SECONDS) and not results:
                 skipped_empty_sectors += 1
-                logging.info("Sector exceeded 20 seconds and was skipped: %s | City: %s", sector, city)
+                logging.info(
+                    "Sector exceeded %.0f seconds and was skipped: %s | City: %s",
+                    SECTOR_TIMEOUT_SECONDS, sector, city,
+                )
                 logging.info("Sector duration: %.2f seconds | %s | %s", time.monotonic() - sector_started, sector, city)
                 continue
             if not results:
