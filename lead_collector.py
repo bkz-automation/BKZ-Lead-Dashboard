@@ -1374,7 +1374,7 @@ def execute_source_pipeline(
 ) -> tuple[list[dict[str, str]], int, int, int, set[str], set[str], int, int, int, int]:
     """Run all network access and parsing for one source inside a timed worker."""
     client = PublicWebClient(settings)
-    client.start_sector_timer(20.0)
+    client.start_sector_timer(60.0)
     accepted_limit = min(5, limit) if source_name == "osm_overpass" else limit
     candidate_limit = min(20, max(accepted_limit, 20)) if source_name == "osm_overpass" else min(
         20 if source_name == "google_places" else 5, limit
@@ -1387,7 +1387,7 @@ def execute_source_pipeline(
     )
     # Discovery has its own bounded window.  Once candidates exist, give them a
     # separate bounded enrichment window so fallback adapters are not starved.
-    client.start_sector_timer(20.0)
+    client.start_sector_timer(60.0)
     for item in parsed[:candidate_limit]:
         logging.info("Primary candidate retained for enrichment: %s", item.get("company_name", ""))
     parsed, candidates_enriched, failed_sources, successful_sources = apply_directory_fallbacks(
