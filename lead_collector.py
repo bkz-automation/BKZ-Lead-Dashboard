@@ -151,6 +151,9 @@ BLOCKED_HOSTS = {
 }
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
 PHONE_RE = re.compile(r"(?:(?:\+|00)212[\s.()\-/]*[5-7](?:[\s.()\-/]*\d){8}|0[5-7](?:[\s.()\-/]*\d){8})")
+MOROCCAN_DIGIT_TRANSLATION = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"
+)
 
 
 @dataclass(frozen=True)
@@ -256,7 +259,7 @@ def prioritize_sectors(sectors: list[str]) -> list[str]:
 
 
 def normalise_phone(value: str) -> str:
-    digits = re.sub(r"\D", "", value or "")
+    digits = re.sub(r"\D", "", str(value or "").translate(MOROCCAN_DIGIT_TRANSLATION))
     if digits.startswith("00212"):
         digits = digits[2:]
     if digits.startswith("0") and len(digits) == 10:
@@ -871,7 +874,7 @@ def enrich_pj_detail(client: PublicWebClient, entry: dict[str, str], city: str) 
         return None
     json_phones, json_emails, _ = json_ld_contact_values(soup)
     raw_phones = [link.get("href", "")[4:] for link in soup.select('a[href^="tel:"]')]
-    raw_phones.extend(PHONE_RE.findall(page_text))
+    raw_phones.extend(moroccan_phone_matches(page_text))
     raw_phones.extend(json_phones)
     phone = preferred_moroccan_phone(raw_phones)
     normalized_mobile = phone if classify_moroccan_phone(phone) == "mobile" else ""
@@ -1042,11 +1045,10 @@ def explicit_whatsapp_number(values: Iterable[str]) -> str:
     candidates: list[str] = []
     for value in values:
         value = html.unescape(str(value or ""))
-        parsed = urlparse(value if "://" in value else "")
-        if parsed.hostname and parsed.hostname.lower().removeprefix("www.") in {
-            "wa.me", "api.whatsapp.com",
-        }:
-            candidates.extend(re.findall(r"(?:212|0)[67]\d{8}", parsed.path + " " + parsed.query))
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower().removeprefix("www.")
+        if host in {"wa.me", "api.whatsapp.com", "web.whatsapp.com", "whatsapp.com"} or parsed.scheme == "whatsapp":
+            candidates.extend(re.findall(r"(?:212|0)[67]\d{8}", value.translate(MOROCCAN_DIGIT_TRANSLATION)))
         else:
             candidates.append(value)
     phone = preferred_moroccan_phone(candidates)
@@ -1059,7 +1061,7 @@ def explicit_whatsapp_from_soup(soup: BeautifulSoup) -> str:
         href = link.get("href", "")
         label = normalise_text(link.get_text(" ", strip=True))
         host = (urlparse(href).hostname or "").lower().removeprefix("www.")
-        if host in {"wa.me", "api.whatsapp.com"} or "whatsapp" in label:
+        if host in {"wa.me", "api.whatsapp.com", "web.whatsapp.com", "whatsapp.com"} or "whatsapp" in label:
             values.append(href)
     return explicit_whatsapp_number(values)
 
@@ -1152,7 +1154,7 @@ def adapter_osm_overpass(
         phone_values = [str(tags.get(key, "")) for key in (
             "phone", "contact:phone", "mobile", "contact:mobile",
         )]
-        phone_values.extend(PHONE_RE.findall(" ".join(phone_values)))
+        phone_values.extend(moroccan_phone_matches(" ".join(phone_values)))
         whatsapp_values = [str(tags.get(key, "")) for key in ("whatsapp", "contact:whatsapp")]
         whatsapp_phone = explicit_whatsapp_number(whatsapp_values)
         phone = whatsapp_phone or preferred_moroccan_phone(phone_values)
@@ -1454,22 +1456,41 @@ def execute_source_pipeline(
 
 
 def first_public_email(soup: BeautifulSoup, text: str) -> str:
-    candidates = []
-    for link in soup.select('a[href^="mailto:"]'):
-        candidates.append(link.get("href", "")[7:].split("?", 1)[0])
-    candidates.extend(EMAIL_RE.findall(text))
-    for value in candidates:
-        value = value.strip(" .,:;()[]<>").lower()
-        if value and not value.endswith((".png", ".jpg", ".jpeg", ".webp")):
-            return value
-    return ""
+    candidates = public_email_candidates(soup, text)
+    return candidates[0] if candidates else ""
+
+
+def cloudflare_email(value: str) -> str:
+    """Decode Cloudflare's public data-cfemail value when it is present in HTML."""
+    try:
+        encoded = bytes.fromhex(value)
+        if len(encoded) < 2:
+            return ""
+        key = encoded[0]
+        return "".join(chr(byte ^ key) for byte in encoded[1:])
+    except ValueError:
+        return ""
+
+
+def deobfuscate_public_email_text(text: str) -> str:
+    text = html.unescape(text or "")
+    text = re.sub(r"\s*(?:\[|\()\s*(?:at|arrobase)\s*(?:\]|\))\s*", "@", text, flags=re.I)
+    text = re.sub(r"\s+(?:at|arrobase)\s+", "@", text, flags=re.I)
+    text = re.sub(r"\s*(?:\[|\()\s*(?:dot|point)\s*(?:\]|\))\s*", ".", text, flags=re.I)
+    text = re.sub(r"\s+(?:dot|point)\s+", ".", text, flags=re.I)
+    return text
+
+
+def moroccan_phone_matches(text: str) -> list[str]:
+    return PHONE_RE.findall(str(text or "").translate(MOROCCAN_DIGIT_TRANSLATION))
 
 
 def public_email_candidates(soup: BeautifulSoup, text: str) -> list[str]:
     candidates: list[str] = []
     for link in soup.select('a[href^="mailto:"]'):
         candidates.append(link.get("href", "")[7:].split("?", 1)[0])
-    candidates.extend(EMAIL_RE.findall(text))
+    candidates.extend(cloudflare_email(node.get("data-cfemail", "")) for node in soup.select("[data-cfemail]"))
+    candidates.extend(EMAIL_RE.findall(deobfuscate_public_email_text(text)))
     valid: list[str] = []
     rejected_domains = {"example.com", "sentry.io", "wixpress.com", "cloudflare.com"}
     for value in candidates:
@@ -1534,7 +1555,7 @@ def first_moroccan_phone(soup: BeautifulSoup, text: str) -> str:
     candidates = []
     for link in soup.select('a[href^="tel:"]'):
         candidates.append(link.get("href", "")[4:])
-    candidates.extend(PHONE_RE.findall(text))
+    candidates.extend(moroccan_phone_matches(text))
     return preferred_moroccan_phone(candidates)
 
 
@@ -2236,6 +2257,17 @@ def run_mocked_osm_tests() -> int:
     internal_pages = candidate_internal_pages(contact_navigation, "https://example.ma")
     assert internal_pages[0] == "https://example.ma/contactez-nous"
     assert "https://example.ma/contact" in internal_pages
+    protected_email = "cloud@example.ma"
+    cfemail = bytes([0x12] + [ord(char) ^ 0x12 for char in protected_email]).hex()
+    email_soup = BeautifulSoup(
+        f'<html><body>contact [at] example [dot] ma <span data-cfemail="{cfemail}"></span></body></html>',
+        "html.parser",
+    )
+    extracted_emails = public_email_candidates(email_soup, email_soup.get_text(" ", strip=True))
+    assert set(extracted_emails) == {"contact@example.ma", protected_email}
+    assert preferred_moroccan_phone(["٠٧ ١٢ ٣٤ ٥٦ ٧٨"]) == "+212712345678"
+    assert explicit_whatsapp_number(["whatsapp://send?phone=212612345678"]) == "+212612345678"
+    assert explicit_whatsapp_number(["https://web.whatsapp.com/send?phone=212712345678"]) == "+212712345678"
     website_client = PublicWebClient.__new__(PublicWebClient)
     website_client.sector_deadline = None
     website_client.fetch_soup = lambda url, **kwargs: (homepage, FakeResponse({}, url))  # type: ignore[method-assign]
