@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import base64
 from datetime import datetime, timedelta
@@ -56,6 +57,7 @@ REQUIRED_COLUMNS = [
     "reply_status",
     "reply_summary",
     "gmail_message_id",
+    "ai_buying_score",
 ]
 
 
@@ -450,6 +452,7 @@ def update_google_sheet(
     service_file: str,
     lead_id: str,
     analysis: dict[str, Any],
+    preserve_contact_status: bool = False,
 ) -> None:
     """Update the matching lead directly in Google Sheets."""
     try:
@@ -476,11 +479,12 @@ def update_google_sheet(
 
         updates = {
             "score": str(analysis["leadScore"]),
-            "contact_status": qualification_label(analysis["qualification"]),
             "personalised_message": analysis["personalisedMessage"],
             "recommended_service": analysis["recommendedService"],
             "why_good_prospect": analysis["whyGoodProspect"],
         }
+        if not preserve_contact_status:
+            updates["contact_status"] = qualification_label(analysis["qualification"])
         worksheet.batch_update([
             {
                 "range": rowcol_to_a1(row_number, headers.index(column) + 1),
@@ -575,7 +579,7 @@ def build_gmail_service() -> Any:
 
 def send_gmail_email(
     recipient: str, subject: str, body: str, gmail_service: Any | None = None
-) -> None:
+) -> str:
     """Send the saved outreach message from the authenticated Gmail account."""
     try:
         message = MIMEText(body, "plain", "utf-8")
@@ -583,9 +587,13 @@ def send_gmail_email(
         message["Subject"] = subject
         raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
         service = gmail_service or build_gmail_service()
-        service.users().messages().send(
+        result = service.users().messages().send(
             userId="me", body={"raw": raw_message}
         ).execute()
+        message_id = str(result.get("id", "")).strip()
+        if not message_id:
+            raise RuntimeError("Gmail send succeeded without returning a message ID")
+        return message_id
     except (FileNotFoundError, ValueError):
         raise
     except Exception as exc:
@@ -638,6 +646,91 @@ def update_google_sheet_email_status(
             raise
         detail = str(exc).strip() or type(exc).__name__
         raise RuntimeError(f"Google Sheets email-status update failed: {detail}") from exc
+
+
+def update_google_sheet_auto_email_status(
+    sheet_id: str,
+    worksheet_name: str,
+    service_file: str,
+    lead_id: str,
+    sent_at: str,
+    gmail_message_id: str,
+) -> None:
+    """Persist the three fields owned by a successful automatic Gmail send."""
+    worksheet = connect_google_worksheet(sheet_id, worksheet_name, service_file)
+    values = worksheet.get_all_values()
+    if not values:
+        raise ValueError("The Google Sheets worksheet is empty.")
+    headers = [str(header).strip() for header in values[0]]
+    required = {"lead_id", "contact_status", "sent_at", "gmail_message_id"}
+    missing = sorted(required - set(headers))
+    if missing:
+        raise ValueError("Google Sheets automatic-email columns missing: " + ", ".join(missing))
+    lead_id_column = headers.index("lead_id")
+    row_number = next((
+        index for index, row in enumerate(values[1:], start=2)
+        if lead_id_column < len(row) and str(row[lead_id_column]).strip() == str(lead_id)
+    ), None)
+    if row_number is None:
+        raise ValueError(f"Lead {lead_id} was not found in Google Sheets.")
+    updates = {
+        "contact_status": "Email Sent",
+        "sent_at": sent_at,
+        "gmail_message_id": gmail_message_id,
+    }
+    worksheet.batch_update([{
+        "range": rowcol_to_a1(row_number, headers.index(column) + 1),
+        "values": [[value]],
+    } for column, value in updates.items()])
+
+
+def is_automatic_email_eligible(lead: Any, personalised_message: str) -> bool:
+    """Apply the automatic-send gate without side effects."""
+    try:
+        ai_score = float(str(lead.get("ai_buying_score", "")).strip())
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        ai_score >= 50
+        and is_valid_email_address(str(lead.get("email", "")).strip())
+        and str(lead.get("contact_status", "")).strip().casefold() == "new"
+        and not str(lead.get("sent_at", "")).strip()
+        and not str(lead.get("gmail_message_id", "")).strip()
+        and str(personalised_message or "").strip()
+    )
+
+
+def auto_send_analyzed_lead(
+    lead: Any,
+    personalised_message: str,
+    send_email: Any = send_gmail_email,
+    update_status: Any | None = None,
+    now: Any | None = None,
+) -> bool:
+    """Send one eligible analyzed lead; failures never mutate lead status."""
+    if not is_automatic_email_eligible(lead, personalised_message):
+        return False
+    company = str(lead.get("company_name", "")).strip()
+    recipient = str(lead.get("email", "")).strip()
+    score = str(lead.get("ai_buying_score", "")).strip()
+    subject = f"Une idÃ©e pour amÃ©liorer {company}"
+    body = email_body_with_opt_out(personalised_message)
+    try:
+        message_id = send_email(recipient, subject, body)
+        if not str(message_id or "").strip():
+            raise RuntimeError("Gmail did not return a message ID")
+        timestamp = (now or datetime.now().astimezone()).strftime("%Y-%m-%d %H:%M:%S %z")
+        if update_status is None:
+            raise RuntimeError("Automatic email status updater is not configured")
+        update_status(str(lead.get("lead_id", "")), timestamp, str(message_id))
+        logging.info("AUTO EMAIL SENT")
+        logging.info("Lead: %s", company)
+        logging.info("Score: %s", score)
+        logging.info("Recipient: %s", recipient)
+        return True
+    except Exception as exc:
+        logging.error("AUTO EMAIL FAILED | Lead: %s | Recipient: %s | Error: %s", company, recipient, exc)
+        return False
 
 
 def load_fresh_google_leads(
@@ -1292,6 +1385,10 @@ def main() -> None:
             try:
                 with st.spinner("Analysing lead with Groq AI..."):
                     analysis = analyse_with_groq(groq_api_key, lead)
+                    auto_eligible = bool(
+                        sheets_connected
+                        and is_automatic_email_eligible(lead, analysis["personalisedMessage"])
+                    )
                     if sheets_connected:
                         update_google_sheet(
                             sheet_id,
@@ -1299,7 +1396,27 @@ def main() -> None:
                             service_file,
                             str(lead["lead_id"]),
                             analysis,
+                            preserve_contact_status=auto_eligible,
                         )
+                        if auto_eligible:
+                            fresh_leads = load_fresh_google_leads(
+                                sheet_id, worksheet_name, service_file
+                            )
+                            fresh_match = fresh_leads[
+                                fresh_leads["lead_id"].astype(str).eq(str(lead["lead_id"]))
+                            ]
+                            if not fresh_match.empty:
+                                enforce_email_send_limits(fresh_leads)
+                                auto_send_analyzed_lead(
+                                    fresh_match.iloc[0],
+                                    analysis["personalisedMessage"],
+                                    update_status=lambda lead_id, sent_at, message_id: (
+                                        update_google_sheet_auto_email_status(
+                                            sheet_id, worksheet_name, service_file,
+                                            lead_id, sent_at, message_id,
+                                        )
+                                    ),
+                                )
                     else:
                         update_lead_csv(csv_path, str(lead["lead_id"]), analysis)
                 st.session_state["notification_message"] = (
