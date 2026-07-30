@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: bkz-lead-collector
+  cancel-in-progress: false
+
 jobs:
   collect-leads:
     runs-on: ubuntu-latest

@@ -120,11 +120,13 @@ The application preserves all lead qualification, Gmail sending, safe queue, rep
 ## Collector scheduling and contact policy
 
 The collector builds a deterministic round-robin plan over every configured
-city, sector, and provider. `--max-searches` is a global provider-call limit;
-when omitted, it equals the complete plan size. A smaller explicit value is
-rejected before network or Google Sheets access, preventing silent partial
-coverage. Two cities, 37 sectors, and four providers require 296 searches. The
-run can still finish early after reaching its deduplicated lead target.
+city, sector, and provider. Each workflow run processes 50 provider searches by
+default. Its city, sector, and provider cursor is stored in the workbook's
+`_collector_state` worksheet after successful lead writes. The next hourly run
+resumes at that exact position, and completion of the full plan wraps the cursor
+back to its beginning. Workflow concurrency prevents overlapping runs from
+racing the persistent cursor. A run can still finish early after reaching its
+deduplicated lead target; its next cursor is saved in the same way.
 
 Each run reports searches by provider, city, and sector, remaining budget, and
 the exact stop reason. Candidates qualify with any business contact channel:

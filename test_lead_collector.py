@@ -27,9 +27,29 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(len(triples), 8)
         self.assertEqual({task.provider for task in plan[:2]}, set(configured.sources))
 
-    def test_insufficient_global_budget_is_rejected_before_network(self):
-        with self.assertRaisesRegex(ValueError, "at least 8 searches are required"):
-            collector.collect(settings(max_searches=4))
+    def test_cursor_round_trip_through_plan(self):
+        configured = settings()
+        plan = collector.round_robin_search_plan(configured)
+        for position, task in enumerate(plan):
+            cursor = collector.cursor_for_task(configured, task)
+            self.assertEqual(collector.cursor_position(configured, plan, cursor), position)
+
+    def test_small_run_budget_stops_successfully_and_logs_next_cursor(self):
+        configured = settings(max_searches=2)
+        original_pipeline = collector.execute_source_pipeline
+        calls = []
+        collector.execute_source_pipeline = lambda _settings, provider, sector, city, *_args: (
+            calls.append((provider, city, sector)) or ([], 0, 0, 0, set(), set(), 0, 0, 0, 0)
+        )
+        try:
+            with self.assertLogs(level="INFO") as captured:
+                result = collector.collect(configured)
+        finally:
+            collector.execute_source_pipeline = original_pipeline
+        self.assertEqual(result, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(any("run search budget exhausted; cursor saved" in line for line in captured.output))
+        self.assertTrue(any("Next cursor position:" in line for line in captured.output))
 
     def test_contact_form_detection(self):
         soup = BeautifulSoup(

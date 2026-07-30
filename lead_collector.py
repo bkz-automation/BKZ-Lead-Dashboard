@@ -49,6 +49,7 @@ AI_BUYING_SCORE_COLUMNS = [
 ]
 CONTACT_COLUMNS = ["whatsapp", "contact_form_url"]
 LEAD_EXPORT_COLUMNS = SHEET_COLUMNS + AI_BUYING_SCORE_COLUMNS + CONTACT_COLUMNS
+SCHEDULER_WORKSHEET = "_collector_state"
 
 # AI Buying Score V1 is deliberately data-driven so commercial tuning does not
 # require changing the scoring flow below.
@@ -309,6 +310,41 @@ class SearchTask:
     provider: str
     city: str
     sector: str
+
+
+@dataclass(frozen=True)
+class SchedulerCursor:
+    city_index: int = 0
+    sector_index: int = 0
+    provider_index: int = 0
+
+
+def cursor_for_task(settings: Settings, task: SearchTask) -> SchedulerCursor:
+    return SchedulerCursor(
+        city_index=settings.cities.index(task.city),
+        sector_index=settings.sectors.index(task.sector),
+        provider_index=settings.sources.index(task.provider),
+    )
+
+
+def cursor_position(settings: Settings, plan: list[SearchTask], cursor: SchedulerCursor) -> int:
+    if not (
+        0 <= cursor.city_index < len(settings.cities)
+        and 0 <= cursor.sector_index < len(settings.sectors)
+        and 0 <= cursor.provider_index < len(settings.sources)
+    ):
+        logging.warning("Stored scheduler cursor is outside the current configuration; resetting to start")
+        return 0
+    target = SearchTask(
+        settings.sources[cursor.provider_index],
+        settings.cities[cursor.city_index],
+        settings.sectors[cursor.sector_index],
+    )
+    try:
+        return plan.index(target)
+    except ValueError:
+        logging.warning("Stored scheduler cursor is not in the current plan; resetting to start")
+        return 0
 
 
 @dataclass
@@ -1568,7 +1604,8 @@ def execute_source_pipeline(
 ) -> tuple[list[dict[str, str]], int, int, int, set[str], set[str], int, int, int, int]:
     """Run all network access and parsing for one source inside a timed worker."""
     client = PublicWebClient(settings)
-    client.start_sector_timer(60.0)
+    phase_budget = 9.0 if settings.fast_mode else 60.0
+    client.start_sector_timer(phase_budget)
     accepted_limit = min(5, limit) if source_name == "osm_overpass" else limit
     candidate_limit = min(20, max(accepted_limit, 20)) if source_name == "osm_overpass" else min(
         20 if source_name == "google_places" else 5, limit
@@ -1581,7 +1618,7 @@ def execute_source_pipeline(
     )
     # Discovery has its own bounded window.  Once candidates exist, give them a
     # separate bounded enrichment window so fallback adapters are not starved.
-    client.start_sector_timer(60.0)
+    client.start_sector_timer(phase_budget)
     for item in parsed[:candidate_limit]:
         logging.info("Primary candidate retained for enrichment: %s", item.get("company_name", ""))
     parsed, _, failed_sources, successful_sources = apply_directory_fallbacks(
@@ -2003,6 +2040,45 @@ def sheets_worksheet(settings: Settings) -> gspread.Worksheet:
     return gspread.authorize(credentials).open_by_key(settings.spreadsheet_id).worksheet(settings.worksheet_name)
 
 
+def scheduler_state_worksheet(lead_worksheet: gspread.Worksheet) -> gspread.Worksheet:
+    spreadsheet = lead_worksheet.spreadsheet
+    try:
+        return spreadsheet.worksheet(SCHEDULER_WORKSHEET)
+    except gspread.WorksheetNotFound:
+        state = spreadsheet.add_worksheet(title=SCHEDULER_WORKSHEET, rows=8, cols=2)
+        state.update([["key", "value"]], range_name="A1:B1", value_input_option="RAW")
+        logging.info("Created persistent scheduler state worksheet: %s", SCHEDULER_WORKSHEET)
+        return state
+
+
+def load_scheduler_cursor(lead_worksheet: gspread.Worksheet) -> SchedulerCursor:
+    state = scheduler_state_worksheet(lead_worksheet)
+    values = state.get_all_values()
+    stored = {row[0]: row[1] for row in values[1:] if len(row) >= 2 and row[0]}
+    try:
+        return SchedulerCursor(
+            city_index=int(stored.get("city_index", 0)),
+            sector_index=int(stored.get("sector_index", 0)),
+            provider_index=int(stored.get("provider_index", 0)),
+        )
+    except ValueError:
+        logging.warning("Persistent scheduler state is malformed; resetting to start")
+        return SchedulerCursor()
+
+
+def save_scheduler_cursor(lead_worksheet: gspread.Worksheet, cursor: SchedulerCursor) -> None:
+    rows = [
+        ["key", "value"],
+        ["city_index", str(cursor.city_index)],
+        ["sector_index", str(cursor.sector_index)],
+        ["provider_index", str(cursor.provider_index)],
+        ["updated_at_utc", datetime.now(timezone.utc).isoformat()],
+    ]
+    scheduler_state_worksheet(lead_worksheet).update(
+        rows, range_name="A1:B5", value_input_option="RAW"
+    )
+
+
 def normalise_sheet_header(value: str) -> str:
     return (value or "").strip().casefold()
 
@@ -2290,6 +2366,7 @@ def collect(settings: Settings) -> int:
     logging.info("Target leads: %d", run_limit)
     logging.info("Leads remaining: %d", run_limit)
     worksheet = None
+    persisted_cursor = SchedulerCursor()
     existing: list[dict[str, str]] = []
     worksheet_headers: list[str] = []
     if not settings.dry_run:
@@ -2297,6 +2374,7 @@ def collect(settings: Settings) -> int:
             worksheet = sheets_worksheet(settings)
             ensure_export_columns(worksheet)
             existing, worksheet_headers = read_existing(worksheet)
+            persisted_cursor = load_scheduler_cursor(worksheet)
             logging.info("Read %d existing leads from worksheet %s", len(existing), settings.worksheet_name)
         except Exception as exc:
             raise RuntimeError(f"Google Sheets setup/read failed; no changes made: {exc}") from exc
@@ -2316,16 +2394,18 @@ def collect(settings: Settings) -> int:
     source_consecutive_failures = {source: 0 for source in settings.sources}
     circuit_open: set[str] = set()
     statistics = RunStatistics.create()
-    required_searches = len(round_robin_search_plan(settings))
-    if settings.max_searches is not None and settings.max_searches < required_searches:
-        raise ValueError(
-            f"--max-searches={settings.max_searches} cannot cover the configured search plan; "
-            f"at least {required_searches} searches are required for "
-            f"{len(settings.cities)} cities x {len(settings.sectors)} sectors x "
-            f"{len(settings.sources)} providers"
-        )
+    search_plan = round_robin_search_plan(settings)
+    required_searches = len(search_plan)
     search_budget = settings.max_searches if settings.max_searches is not None else required_searches
-    logging.info("Global search budget: %d | complete coverage requires: %d", search_budget, required_searches)
+    start_position = cursor_position(settings, search_plan, persisted_cursor)
+    next_position = start_position
+    schedule_position = -1
+    logging.info("Search budget this run: %d | full plan size: %d", search_budget, required_searches)
+    logging.info(
+        "Current cursor: city_index=%d sector_index=%d provider_index=%d | plan_position=%d",
+        persisted_cursor.city_index, persisted_cursor.sector_index,
+        persisted_cursor.provider_index, start_position,
+    )
 
     stop = False
     stop_reason = "configured cities and sectors exhausted"
@@ -2335,12 +2415,12 @@ def collect(settings: Settings) -> int:
         for city_index, city in enumerate(scheduled_cities):
             if (
                 len(new_leads) >= run_limit
-                or (settings.max_searches is not None and searches >= settings.max_searches)
+                or searches >= search_budget
             ):
                 stop = True
                 stop_reason = (
                     limit_stop_reason if len(new_leads) >= run_limit
-                    else "maximum searches reached"
+                    else "run search budget exhausted; cursor saved"
                 )
                 break
             logging.info("City scheduled: %s", city)
@@ -2351,13 +2431,18 @@ def collect(settings: Settings) -> int:
             provider_offset = (sector_index + city_index) % len(settings.sources)
             sector_sources = settings.sources[provider_offset:] + settings.sources[:provider_offset]
             for source_name in sector_sources:
+                schedule_position += 1
+                if schedule_position < start_position:
+                    continue
+                if searches >= search_budget:
+                    stop = True
+                    stop_reason = "run search budget exhausted; cursor saved"
+                    next_position = schedule_position
+                    break
                 if source_name in circuit_open:
                     logging.info("Source circuit breaker open; skipped for rest of run: %s", source_name)
+                    next_position = schedule_position + 1
                     continue
-                if settings.max_searches is not None and searches >= settings.max_searches:
-                    stop = True
-                    stop_reason = "maximum searches reached"
-                    break
                 leads_needed = run_limit - len(new_leads)
                 if source_name == "google_places":
                     detail_budget = settings.max_place_details - place_details_requests_total
@@ -2370,6 +2455,7 @@ def collect(settings: Settings) -> int:
                         stop = True
                     break
                 searches += 1
+                next_position = schedule_position + 1
                 statistics.record_search(SearchTask(source_name, city, sector))
                 logging.info("Source used: %s | Sector: %s | City: %s", source_name, sector, city)
                 logging.info(
@@ -2400,10 +2486,9 @@ def collect(settings: Settings) -> int:
                             pipeline_failed_sources, pipeline_successful_sources,
                             pipeline_text_requests, pipeline_detail_requests,
                             pipeline_overpass_requests, pipeline_osm_discovered,
-                        # The worker has separate 60-second discovery and enrichment
-                        # windows.  Wait for that bounded work to return its accepted
-                        # leads instead of discarding them after 40 seconds.
-                        ) = future.result(timeout=125.0)
+                        # Fast mode has separate nine-second discovery and enrichment
+                        # windows, keeping 50 searches inside the Actions run limit.
+                        ) = future.result(timeout=20.0)
                     else:
                         (
                             parsed, pipeline_rejected, pipeline_discovered, pipeline_enriched,
@@ -2416,7 +2501,7 @@ def collect(settings: Settings) -> int:
                     sector_timed_out = True
                     parsed = []
                     source_timeout_failure = True
-                    logging.warning("Sectorhard  timeout reached after 20 seconds")
+                    logging.warning("Search hard timeout reached after 20 seconds")
                 except SectorTimeout as exc:
                     sector_timed_out = True
                     parsed = []
@@ -2504,11 +2589,28 @@ def collect(settings: Settings) -> int:
         if stop:
             break
 
+    if next_position >= required_searches:
+        next_position = 0
+        if not stop:
+            stop_reason = "full search plan completed; cursor wrapped to beginning"
+    next_cursor = cursor_for_task(settings, search_plan[next_position])
+
     if worksheet is not None and new_leads:
         try:
             write_new_leads(worksheet, new_leads, worksheet_headers)
         except Exception as exc:
             raise RuntimeError(f"Google Sheets explicit A:T write failed: {exc}") from exc
+    if worksheet is not None:
+        try:
+            save_scheduler_cursor(worksheet, next_cursor)
+        except Exception as exc:
+            raise RuntimeError(f"Scheduler cursor save failed: {exc}") from exc
+    logging.info("Searches completed this run: %d", searches)
+    logging.info("Remaining searches in current plan cycle: %d", (required_searches - next_position) % required_searches)
+    logging.info(
+        "Next cursor position: city_index=%d sector_index=%d provider_index=%d | plan_position=%d",
+        next_cursor.city_index, next_cursor.sector_index, next_cursor.provider_index, next_position,
+    )
     logging.info("Run summary: source searches completed=%d, leads found=%d, duplicates removed=%d, leads appended=%d",
                  searches, found, duplicates, 0 if settings.dry_run else len(new_leads))
     logging.info("Searches per provider: %s", json.dumps(dict(sorted(statistics.searches_by_provider.items())), sort_keys=True))

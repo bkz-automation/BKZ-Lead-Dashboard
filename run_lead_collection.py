@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--city", choices=("Agadir", "Casablanca", "Marrakech"), help="Optional city override")
     parser.add_argument("--sector", help="Optional sector override")
     parser.add_argument("--target-leads", type=int, default=20)
-    parser.add_argument("--max-searches", type=int, help="Optional global search limit; must cover the complete plan")
+    parser.add_argument("--max-searches", type=int, default=50, help="Searches to process in this run (default: 50)")
     parser.add_argument("--write-sheets", action="store_true", help="Enable the collector's existing Google Sheets write step")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
