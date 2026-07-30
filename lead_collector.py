@@ -51,27 +51,15 @@ CONTACT_COLUMNS = ["whatsapp", "contact_form_url"]
 LEAD_EXPORT_COLUMNS = SHEET_COLUMNS + AI_BUYING_SCORE_COLUMNS + CONTACT_COLUMNS
 SCHEDULER_WORKSHEET = "_collector_state"
 
-# AI Buying Score V1 is deliberately data-driven so commercial tuning does not
-# require changing the scoring flow below.
 AI_BUYING_SCORE_WEIGHTS = {
-    "sector_fit": {"max": 25, "high": 25, "medium": 18, "general": 10},
-    "digital_maturity": {"max": 15, "website": 8, "domain_email": 4, "social": 3},
-    "company_size_proxy": {"max": 12, "scale_signal": 12, "complete_contact": 7, "basic_footprint": 4},
-    "operational_pain": {"max": 12, "workflow_signal": 12, "high_fit_sector": 8, "general": 4},
-    "buying_intent": {"max": 10, "workflow_online": 10, "digital_contact": 7, "limited": 3},
-    "reachability": {"max": 8, "whatsapp": 8, "mobile": 6, "email": 4, "landline": 1},
-    "business_email": {"max": 6, "present": 6},
-    "decision_maker": {"max": 6, "signal": 6},
-    "growth_signals": {"max": 4, "signal": 4, "digital_footprint": 2},
-}
-AI_BUYING_SCORE_PENALTIES = {
-    "no_website": -20,
-    "landline_only": -15,
-    "inactive_company": -25,
+    "automation_opportunity": 40,
+    "business_maturity": 20,
+    "contactability": 15,
+    "buying_intent": 15,
+    "ai_fit": 10,
 }
 AI_BUYING_SCORE_LIMITS = {"minimum": 0, "maximum": 100}
 AI_BUYING_SCORE_PRIORITY_THRESHOLDS = ((85, "A+"), (70, "A"), (55, "B"), (40, "C"))
-AI_BUYING_SCORE_BASE_MAX = sum(component["max"] for component in AI_BUYING_SCORE_WEIGHTS.values())
 
 AI_BUYING_SCORE_SOCIAL_FIELDS = ("facebook_url", "instagram_url", "linkedin_url")
 AI_BUYING_SCORE_HIGH_FIT_TERMS = (
@@ -97,21 +85,27 @@ AI_BUYING_SCORE_GROWTH_TERMS = (
     "nouveau", "new", "ouverture", "opening", "recrut", "expansion", "developp",
     "promotion", "offre", "online", "en ligne", "reservation", "booking",
 )
-AI_BUYING_SCORE_DECISION_MAKER_TERMS = (
-    "gerant", "gerante", "directeur", "directrice", "director", "owner", "founder",
-    "fondateur", "fondatrice", "ceo", "manager",
-)
 AI_BUYING_SCORE_INACTIVE_TERMS = (
     "ferme", "closed", "permanently closed", "cessation", "liquidation", "inactive",
 )
-AI_RECOMMENDED_OFFER_RULES = (
-    (("restaurant", "cafe", "hotel", "riad", "hote", "traiteur"), "AI WhatsApp Ordering and Reservation Assistant"),
-    (("clinique", "medical", "dentaire", "radiologie", "laboratoire", "veterinaire"), "AI Receptionist and Appointment Assistant"),
-    (("immobili", "location", "architect"), "AI Lead Qualification and Viewing Assistant"),
-    (("ecole", "formation", "creche", "auto ecole"), "AI Admissions and Prospect Follow-up Assistant"),
-    (("salon", "beaute", "spa", "fitness", "sport"), "AI Booking and Client Follow-up Assistant"),
-    (("agence", "avocat", "comptable", "etudes"), "AI Lead Qualification and CRM Follow-up Assistant"),
-    (("boutique", "magasin", "supermarche", "bijouter", "opticien"), "AI Customer Service and Order Assistant"),
+AI_SECTOR_PROFILES = (
+    (("dental", "dentaire", "dentist"), 36, 12, "AI Booking and Follow-up Assistant", "appointment-heavy patient journey"),
+    (("hotel", "riad", "hote", "guest house"), 38, 13, "AI Reservation Assistant", "high-volume reservation and guest inquiry workflow"),
+    (("restaurant", "cafe", "traiteur", "bakery", "boulanger", "patisserie"), 36, 11, "AI Ordering Assistant", "frequent ordering, reservation, and customer-service workflow"),
+    (("clinique", "medical", "radiologie", "laboratoire", "veterinaire", "pharmac"), 36, 12, "AI Appointment Assistant", "appointment and patient-support workflow"),
+    (("law", "avocat"), 34, 12, "AI Client Intake Assistant", "repetitive client intake and document workflow"),
+    (("account", "comptable"), 34, 12, "AI Document Automation", "document-intensive recurring administrative workflow"),
+    (("real estate", "immobili"), 37, 13, "AI Lead Qualification and CRM Assistant", "high-value lead qualification and follow-up workflow"),
+    (("insurance", "assurance"), 36, 13, "AI Lead Qualification Assistant", "quote, qualification, and renewal workflow"),
+    (("gym", "fitness", "sport"), 34, 11, "AI Membership Assistant", "membership inquiry, booking, and retention workflow"),
+    (("salon", "beaute", "spa", "esthetique"), 35, 11, "AI Booking and Follow-up Assistant", "appointment and repeat-customer workflow"),
+    (("school", "ecole", "formation", "creche"), 34, 11, "AI Admissions Assistant", "admissions inquiry and prospect follow-up workflow"),
+    (("travel", "voyage", "car rental", "location de voitures"), 35, 12, "AI Reservation and Sales Assistant", "reservation, quotation, and customer inquiry workflow"),
+    (("call center", "centre appels", "bpo"), 39, 13, "AI Customer Support Automation", "very high customer-support and repetitive process volume"),
+    (("marketing", "digital agenc", "agence web"), 31, 12, "AI Lead Qualification and Delivery Assistant", "lead qualification and recurring client-delivery workflow"),
+    (("logistics", "transport", "freight"), 32, 12, "AI Operations and Customer Update Assistant", "quotation, dispatch, and status-update workflow"),
+    (("construction", "architect", "engineering", "etudes"), 30, 12, "AI Lead Qualification and Document Assistant", "complex quotation and project-document workflow"),
+    (("retail", "boutique", "magasin", "wholesale", "grossiste", "distribut", "furniture", "meuble"), 29, 10, "AI Sales and Customer Service Assistant", "product inquiry, quotation, and sales follow-up workflow"),
 )
 AI_RECOMMENDED_OFFER_DEFAULT = "AI Lead Qualification and Follow-up Assistant"
 
@@ -1699,6 +1693,14 @@ def execute_source_pipeline(
                 lead.get("company_name", ""), buying_score["score"],
                 buying_score["priority"], buying_score["recommended_offer"],
             )
+            logging.info(
+                "AI score breakdown: %s",
+                " | ".join(
+                    f"{name.replace('_', ' ').title()}={component['points']}/{component['max']}"
+                    for name, component in buying_score["breakdown"]["components"].items()
+                ),
+            )
+            logging.info("AI score reasons: %s", " | ".join(buying_score["reasons"]))
         else:
             rejected_no_mobile_email += 1
             logging.info("Lead rejected after all enrichment sources exhausted: %s", lead.get("company_name", ""))
@@ -1880,142 +1882,138 @@ def automation_opportunity(sector: str) -> str:
 
 
 def recommended_ai_offer(sector: str) -> str:
-    """Choose one deterministic BKZ offer from the lead's business sector."""
+    """Choose the single strongest automation offer for the business sector."""
     key = normalise_text(sector)
-    for keywords, offer in AI_RECOMMENDED_OFFER_RULES:
+    for keywords, _, _, offer, _ in AI_SECTOR_PROFILES:
         if any(word in key for word in keywords):
             return offer
     return AI_RECOMMENDED_OFFER_DEFAULT
 
 
 def calculate_ai_buying_score(lead: dict[str, str]) -> dict[str, object]:
-    """Return an explainable, deterministic 0-100 buying score for one accepted lead.
-
-    The supplied component maxima add to 98.  Their relative weights are retained and
-    the base is normalized to 100 before applying explicit risk penalties.
-    """
+    """Score commercial AI potential; contact availability is capped at 15%."""
     sector = normalise_text(lead.get("industry", ""))
-    description = normalise_text(" ".join((
-        lead.get("company_name", ""),
-        lead.get("business_description", ""),
+    raw_description = clean_text(lead.get("business_description", ""))
+    evidence = normalise_text(" ".join((
+        lead.get("company_name", ""), raw_description,
         lead.get("automation_opportunity", ""),
     )))
     website = canonical_website_url(lead.get("website", ""))
     email = str(lead.get("email", "")).strip().casefold()
-    phone_classification = str(lead.get("_phone_classification", ""))
-    whatsapp = bool(lead.get("whatsapp_confirmed"))
+    phone = canonical_candidate_phone(lead)
+    whatsapp = bool(lead.get("whatsapp_confirmed") or lead.get("whatsapp"))
+    contact_form = bool(lead.get("contact_form_url"))
     website_host = (urlparse(website).hostname or "").lower().removeprefix("www.")
     email_domain = email.rsplit("@", 1)[-1] if "@" in email else ""
     social_presence = any(bool(lead.get(field)) for field in AI_BUYING_SCORE_SOCIAL_FIELDS)
 
-    if any(term in sector for term in AI_BUYING_SCORE_HIGH_FIT_TERMS):
-        sector_fit, sector_reason = AI_BUYING_SCORE_WEIGHTS["sector_fit"]["high"], "sector has a high-volume automation use case"
-    elif any(term in sector for term in AI_BUYING_SCORE_MEDIUM_FIT_TERMS):
-        sector_fit, sector_reason = AI_BUYING_SCORE_WEIGHTS["sector_fit"]["medium"], "sector has a practical automation use case"
-    else:
-        sector_fit, sector_reason = AI_BUYING_SCORE_WEIGHTS["sector_fit"]["general"], "sector fit is general rather than vertical-specific"
+    automation, intent = 22, 7
+    offer = AI_RECOMMENDED_OFFER_DEFAULT
+    sector_reason = "general lead and follow-up workflow"
+    for keywords, automation_base, intent_base, profile_offer, profile_reason in AI_SECTOR_PROFILES:
+        if any(term in sector for term in keywords):
+            automation, intent = automation_base, intent_base
+            offer, sector_reason = profile_offer, profile_reason
+            break
 
-    digital_maturity = 0
-    digital_reasons: list[str] = []
+    workflow_signal = any(term in evidence for term in AI_BUYING_SCORE_OPERATIONAL_TERMS)
+    scale_signal = any(term in evidence for term in AI_BUYING_SCORE_SCALE_TERMS)
+    growth_signal = any(term in evidence for term in AI_BUYING_SCORE_GROWTH_TERMS)
+    service_signal = any(term in evidence for term in (
+        "service", "services", "solution", "solutions", "offre", "prestations", "specialite",
+    ))
+    premium_signal = any(term in evidence for term in (
+        "premium", "luxe", "luxury", "haut de gamme", "exclusive", "resort", "boutique hotel",
+    ))
+    volume_signal = any(term in evidence for term in (
+        "24 7", "clients", "patients", "reservations", "commandes", "members", "admissions",
+    ))
+
+    automation = min(40, automation + (2 if workflow_signal else 0) + (2 if scale_signal else 0))
+    automation_reason = sector_reason + ("; explicit repetitive workflow detected" if workflow_signal else "")
+
+    maturity = 0
+    maturity_signals: list[str] = []
     if website:
-        digital_maturity += AI_BUYING_SCORE_WEIGHTS["digital_maturity"]["website"]
-        digital_reasons.append("official website")
-    if email and website_host and (email_domain == website_host or email_domain.endswith("." + website_host)):
-        digital_maturity += AI_BUYING_SCORE_WEIGHTS["digital_maturity"]["domain_email"]
-        digital_reasons.append("domain-matched business email")
-    if social_presence:
-        digital_maturity += AI_BUYING_SCORE_WEIGHTS["digital_maturity"]["social"]
-        digital_reasons.append("public business social profile")
+        maturity += 7
+        maturity_signals.append("Professional website")
+    if len(raw_description) >= 80:
+        maturity += 4
+        maturity_signals.append("Substantive business description")
+    elif len(raw_description) >= 30:
+        maturity += 2
+        maturity_signals.append("Business description available")
+    if service_signal:
+        maturity += 3
+        maturity_signals.append("Multiple-service positioning")
+    if premium_signal:
+        maturity += 3
+        maturity_signals.append("Premium positioning")
+    if social_presence or growth_signal:
+        maturity += 3
+        maturity_signals.append("Active online or growth presence")
+    maturity = min(20, maturity)
 
-    if any(term in description for term in AI_BUYING_SCORE_SCALE_TERMS):
-        company_size, company_size_reason = AI_BUYING_SCORE_WEIGHTS["company_size_proxy"]["scale_signal"], "multi-site, team, or group signal found"
-    elif website and email and phone_classification == "mobile":
-        company_size, company_size_reason = AI_BUYING_SCORE_WEIGHTS["company_size_proxy"]["complete_contact"], "complete public contact footprint"
-    elif website or email:
-        company_size, company_size_reason = AI_BUYING_SCORE_WEIGHTS["company_size_proxy"]["basic_footprint"], "basic public business footprint"
-    else:
-        company_size, company_size_reason = 0, "no size proxy available"
-
-    if any(term in description for term in AI_BUYING_SCORE_OPERATIONAL_TERMS):
-        operational_pain, operational_reason = AI_BUYING_SCORE_WEIGHTS["operational_pain"]["workflow_signal"], "booking, order, quote, or appointment workflow detected"
-    elif any(term in sector for term in AI_BUYING_SCORE_HIGH_FIT_TERMS):
-        operational_pain, operational_reason = AI_BUYING_SCORE_WEIGHTS["operational_pain"]["high_fit_sector"], "sector commonly has repetitive customer workflows"
-    else:
-        operational_pain, operational_reason = AI_BUYING_SCORE_WEIGHTS["operational_pain"]["general"], "general follow-up opportunity"
-
-    if any(term in description for term in AI_BUYING_SCORE_OPERATIONAL_TERMS) and website:
-        buying_intent, buying_intent_reason = AI_BUYING_SCORE_WEIGHTS["buying_intent"]["workflow_online"], "active service workflow is visible online"
-    elif website and (email or phone_classification == "mobile" or whatsapp):
-        buying_intent, buying_intent_reason = AI_BUYING_SCORE_WEIGHTS["buying_intent"]["digital_contact"], "active digital contact path is available"
-    elif website or email:
-        buying_intent, buying_intent_reason = AI_BUYING_SCORE_WEIGHTS["buying_intent"]["limited"], "limited public buying-intent evidence"
-    else:
-        buying_intent, buying_intent_reason = 0, "no public buying-intent evidence"
-
+    contactability = 0
+    contact_signals: list[str] = []
+    if website:
+        contactability += 3
+        contact_signals.append("Public website")
+    professional_email = bool(email and website_host and (
+        email_domain == website_host or email_domain.endswith("." + website_host)
+    ))
+    if email:
+        contactability += 3 if professional_email else 2
+        contact_signals.append("Professional email" if professional_email else "Public email")
+    if phone:
+        contactability += 3
+        contact_signals.append("Public phone number")
     if whatsapp:
-        reachability, reachability_reason = AI_BUYING_SCORE_WEIGHTS["reachability"]["whatsapp"], "explicit WhatsApp contact"
-    elif phone_classification == "mobile":
-        reachability, reachability_reason = AI_BUYING_SCORE_WEIGHTS["reachability"]["mobile"], "public Moroccan mobile"
-    elif email:
-        reachability, reachability_reason = AI_BUYING_SCORE_WEIGHTS["reachability"]["email"], "public email contact"
-    elif phone_classification == "landline":
-        reachability, reachability_reason = AI_BUYING_SCORE_WEIGHTS["reachability"]["landline"], "landline only"
-    else:
-        reachability, reachability_reason = 0, "no reachable contact"
+        contactability += 4
+        contact_signals.append("Direct WhatsApp channel")
+    if contact_form:
+        contactability += 2
+        contact_signals.append("Contact form")
+    contactability = min(15, contactability)
 
-    business_email = AI_BUYING_SCORE_WEIGHTS["business_email"]["present"] if email else 0
-    business_email_reason = "public business email" if email else "no public business email"
-    email_local_part = email.split("@", 1)[0] if "@" in email else ""
-    if any(term in f"{email_local_part} {description}" for term in AI_BUYING_SCORE_DECISION_MAKER_TERMS):
-        decision_maker, decision_maker_reason = AI_BUYING_SCORE_WEIGHTS["decision_maker"]["signal"], "decision-maker signal in public contact data"
-    else:
-        decision_maker, decision_maker_reason = 0, "no decision-maker signal available"
-    if any(term in description for term in AI_BUYING_SCORE_GROWTH_TERMS):
-        growth_signals, growth_reason = AI_BUYING_SCORE_WEIGHTS["growth_signals"]["signal"], "growth or active-service signal found"
-    elif website and (email or phone_classification == "mobile"):
-        growth_signals, growth_reason = AI_BUYING_SCORE_WEIGHTS["growth_signals"]["digital_footprint"], "active digital business footprint"
-    else:
-        growth_signals, growth_reason = 0, "no public growth signal"
+    intent += 2 if scale_signal else 0
+    intent += 2 if premium_signal else 0
+    intent += 1 if workflow_signal else 0
+    intent += 1 if growth_signal else 0
+    intent += 1 if volume_signal else 0
+    intent = min(15, intent)
+    intent_reason = "industry economics and service complexity"
+    if scale_signal:
+        intent_reason += "; multi-location or scale signal"
+    if premium_signal:
+        intent_reason += "; premium positioning"
+    if growth_signal:
+        intent_reason += "; active growth signal"
 
+    ai_fit = 10 if offer != AI_RECOMMENDED_OFFER_DEFAULT else 6 + (2 if workflow_signal else 0)
     components = {
-        "sector_fit": {"points": sector_fit, "max": AI_BUYING_SCORE_WEIGHTS["sector_fit"]["max"], "reason": sector_reason},
-        "digital_maturity": {"points": digital_maturity, "max": AI_BUYING_SCORE_WEIGHTS["digital_maturity"]["max"], "reason": ", ".join(digital_reasons) or "no digital maturity signal"},
-        "company_size_proxy": {"points": company_size, "max": AI_BUYING_SCORE_WEIGHTS["company_size_proxy"]["max"], "reason": company_size_reason},
-        "operational_pain": {"points": operational_pain, "max": AI_BUYING_SCORE_WEIGHTS["operational_pain"]["max"], "reason": operational_reason},
-        "buying_intent": {"points": buying_intent, "max": AI_BUYING_SCORE_WEIGHTS["buying_intent"]["max"], "reason": buying_intent_reason},
-        "reachability": {"points": reachability, "max": AI_BUYING_SCORE_WEIGHTS["reachability"]["max"], "reason": reachability_reason},
-        "business_email": {"points": business_email, "max": AI_BUYING_SCORE_WEIGHTS["business_email"]["max"], "reason": business_email_reason},
-        "decision_maker": {"points": decision_maker, "max": AI_BUYING_SCORE_WEIGHTS["decision_maker"]["max"], "reason": decision_maker_reason},
-        "growth_signals": {"points": growth_signals, "max": AI_BUYING_SCORE_WEIGHTS["growth_signals"]["max"], "reason": growth_reason},
+        "automation_opportunity": {"points": automation, "max": 40, "reason": automation_reason},
+        "business_maturity": {"points": maturity, "max": 20, "reason": ", ".join(maturity_signals) or "Limited maturity evidence"},
+        "contactability": {"points": contactability, "max": 15, "reason": ", ".join(contact_signals) or "No public contact channel"},
+        "buying_intent": {"points": intent, "max": 15, "reason": intent_reason},
+        "ai_fit": {"points": ai_fit, "max": 10, "reason": f"Clear fit for {offer}"},
     }
-    raw_total = sum(int(component["points"]) for component in components.values())
-    normalized_total = round(raw_total * AI_BUYING_SCORE_LIMITS["maximum"] / AI_BUYING_SCORE_BASE_MAX)
-    penalties: dict[str, int] = {}
-    if not website:
-        penalties["no_website"] = AI_BUYING_SCORE_PENALTIES["no_website"]
-    if phone_classification == "landline":
-        penalties["landline_only"] = AI_BUYING_SCORE_PENALTIES["landline_only"]
-    if any(term in description for term in AI_BUYING_SCORE_INACTIVE_TERMS):
-        penalties["inactive_company"] = AI_BUYING_SCORE_PENALTIES["inactive_company"]
-    penalty_total = sum(penalties.values())
-    score = max(AI_BUYING_SCORE_LIMITS["minimum"], min(AI_BUYING_SCORE_LIMITS["maximum"], normalized_total + penalty_total))
+    score = max(0, min(100, sum(int(item["points"]) for item in components.values())))
     priority = next((label for threshold, label in AI_BUYING_SCORE_PRIORITY_THRESHOLDS if score >= threshold), "D")
-    reasons = [
-        f"{name.replace('_', ' ')}: {component['points']}/{component['max']} ({component['reason']})"
-        for name, component in components.items() if component["points"]
-    ]
-    reasons.extend(f"penalty {name.replace('_', ' ')}: {points}" for name, points in penalties.items())
+    reasons = [f"High-value automation use case: {sector_reason.capitalize()}"]
+    if workflow_signal:
+        reasons.append("Repetitive booking, ordering, quotation, or administrative workflow detected")
+    if scale_signal:
+        reasons.append("Multi-location or operational scale signal")
+    reasons.extend(maturity_signals[:2])
+    reasons.extend(contact_signals[:2])
+    reasons.append(f"Suitable for {offer}")
+    reasons = list(dict.fromkeys(reasons))[:8]
     return {
         "score": score,
         "priority": priority,
-        "recommended_offer": recommended_ai_offer(lead.get("industry", "")),
-        "breakdown": {
-            "components": components,
-            "raw_total": raw_total,
-            "normalized_total": normalized_total,
-            "penalties": penalties,
-            "penalty_total": penalty_total,
-        },
+        "recommended_offer": offer,
+        "breakdown": {"components": components, "total": score, "reasons": reasons},
         "reasons": reasons,
     }
 

@@ -120,6 +120,46 @@ class CollectorTests(unittest.TestCase):
         self.assertTrue(any("Company: Company" in line for line in captured.output))
         self.assertTrue(any("Phone: +212528123456" in line for line in captured.output))
 
+    def test_ai_score_uses_requested_category_weights(self):
+        result = collector.calculate_ai_buying_score({
+            "company_name": "Atlas Luxury Group Hotel",
+            "industry": "Hotels",
+            "website": "https://atlas.ma",
+            "email": "",
+            "phone": "+212612345678",
+            "whatsapp_confirmed": True,
+            "contact_form_url": "https://atlas.ma/contact",
+            "business_description": (
+                "Premium multi-location resort offering multiple services, 24 7 guest support, "
+                "online reservations, spa services, and active expansion."
+            ),
+            "automation_opportunity": "Automate reservations and repetitive guest inquiries.",
+        })
+        components = result["breakdown"]["components"]
+        self.assertEqual(
+            {name: component["max"] for name, component in components.items()},
+            {"automation_opportunity": 40, "business_maturity": 20, "contactability": 15,
+             "buying_intent": 15, "ai_fit": 10},
+        )
+        self.assertGreaterEqual(result["score"], 90)
+        self.assertEqual(result["recommended_offer"], "AI Reservation Assistant")
+        self.assertGreaterEqual(len(result["reasons"]), 3)
+        self.assertLessEqual(len(result["reasons"]), 8)
+
+    def test_missing_email_changes_contactability_only(self):
+        base = {
+            "company_name": "Atlas Hotel", "industry": "Hotels",
+            "website": "https://atlas.ma", "phone": "+212612345678",
+            "business_description": "Hotel with online reservations and guest support services.",
+        }
+        without_email = collector.calculate_ai_buying_score(base)
+        with_email = collector.calculate_ai_buying_score({**base, "email": "info@atlas.ma"})
+        left = without_email["breakdown"]["components"]
+        right = with_email["breakdown"]["components"]
+        for category in ("automation_opportunity", "business_maturity", "buying_intent", "ai_fit"):
+            self.assertEqual(left[category]["points"], right[category]["points"])
+        self.assertEqual(right["contactability"]["points"] - left["contactability"]["points"], 3)
+
     def test_website_only_candidate_is_accepted(self):
         configured = settings(cities=["Agadir"], sectors=["Hotels"], sources=["pages_maroc"])
         original_adapter = collector.SOURCE_ADAPTERS["pages_maroc"]
