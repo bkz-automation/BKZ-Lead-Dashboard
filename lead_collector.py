@@ -490,14 +490,28 @@ def classify_moroccan_phone(value: str) -> str:
 
 
 def preferred_moroccan_phone(values: Iterable[str]) -> str:
-    normalized = list(dict.fromkeys(
-        phone for phone in (canonical_moroccan_phone(value) for value in values) if phone
-    ))
+    normalized: list[str] = []
+    for value in values:
+        text = str(value or "").translate(MOROCCAN_DIGIT_TRANSLATION)
+        candidates = [text, *PHONE_RE.findall(text)]
+        for candidate in candidates:
+            phone = canonical_moroccan_phone(candidate)
+            if phone and phone not in normalized:
+                normalized.append(phone)
     for classification in ("mobile", "landline"):
         for phone in normalized:
             if classify_moroccan_phone(phone) == classification:
                 return phone
     return ""
+
+
+def canonical_candidate_phone(candidate: dict[str, object]) -> str:
+    """Collapse every internal phone representation into the exported field."""
+    return preferred_moroccan_phone([
+        str(candidate.get("whatsapp", "")),
+        str(candidate.get("phone", "")),
+        str(candidate.get("_landline_phone", "")),
+    ])
 
 
 def canonical_url(value: str) -> str:
@@ -651,7 +665,7 @@ class PublicWebClient:
             result["contact_form_url"] = contact_form_from_soup(soup, response.url)
             whatsapp_phone = explicit_whatsapp_from_soup(soup)
             page_phone = first_moroccan_phone(soup, page_text)
-            result["phone"] = whatsapp_phone or page_phone or phone
+            result["phone"] = preferred_moroccan_phone([whatsapp_phone, page_phone, phone])
             result["whatsapp_confirmed"] = bool(
                 result.get("whatsapp_confirmed") or whatsapp_phone
             )
@@ -1542,7 +1556,7 @@ def directory_lead_to_sheet(result: dict[str, str], sector: str, city: str) -> d
     name = clean_company_name(result.get("company_name", ""))
     if not name or not directory_location_valid(result.get("location", ""), city):
         return None
-    phone = result.get("phone", "")
+    phone = canonical_candidate_phone(result)
     website = canonical_website_url(result.get("website", ""))
     source_url = result.get("source_url", "")
     description = result.get("business_description", "") or f"{sector.capitalize()} basée à {city}."
@@ -1579,18 +1593,19 @@ def directory_lead_to_sheet(result: dict[str, str], sector: str, city: str) -> d
 
 
 def apply_phone_policy(lead: dict[str, str], allow_landlines: bool) -> dict[str, str]:
+    """Canonicalize a business phone without discarding valid landlines.
+
+    ``allow_landlines`` is retained for CLI compatibility. Landlines are now
+    always stored because the lead acceptance policy treats any business phone
+    as a valid contact channel.
+    """
     lead = dict(lead)
-    phone = canonical_moroccan_phone(lead.get("phone", ""))
+    phone = canonical_candidate_phone(lead)
     classification = classify_moroccan_phone(phone)
     lead["_phone_classification"] = classification
-    if classification == "mobile":
-        lead["phone"] = phone
-    elif classification == "landline" and allow_landlines:
-        lead["phone"] = phone
-    else:
-        if classification == "landline":
-            lead["_landline_phone"] = phone
-        lead["phone"] = ""
+    lead["phone"] = phone
+    if classification == "landline":
+        lead["_landline_phone"] = phone
     return lead
 
 
@@ -1611,6 +1626,8 @@ def execute_source_pipeline(
         20 if source_name == "google_places" else 5, limit
     )
     parsed = SOURCE_ADAPTERS[source_name](client, sector, city, candidate_limit)
+    for candidate in parsed:
+        candidate["phone"] = canonical_candidate_phone(candidate)
     candidates_discovered = (
         client.places_discovered if source_name == "google_places"
         else client.osm_businesses_discovered if source_name == "osm_overpass"
@@ -2151,6 +2168,13 @@ def write_new_leads(
     }
     rows: list[list[str]] = []
     for lead in leads:
+        canonical_phone = canonical_candidate_phone(lead)
+        lead["phone"] = canonical_phone
+        logging.info("Lead values immediately before append:")
+        logging.info("Company: %s", lead.get("company_name", ""))
+        logging.info("Phone: %s", canonical_phone)
+        logging.info("Email: %s", lead.get("email", ""))
+        logging.info("Website: %s", lead.get("website", ""))
         row = [""] * len(worksheet_headers)
         for column in LEAD_EXPORT_COLUMNS:
             # The normal collection path has already migrated the header.  Keeping
@@ -2854,7 +2878,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--allow-landlines", action="store_true",
-        help="Allow Moroccan 05/+2125 landlines in the stored phone field",
+        help="Deprecated compatibility flag; valid Moroccan business landlines are always stored",
     )
     parser.add_argument(
         "--sources", nargs="+", metavar="SOURCE",
