@@ -32,6 +32,7 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
+from gspread.utils import rowcol_to_a1
 from requests.adapters import HTTPAdapter
 
 
@@ -2197,6 +2198,162 @@ def write_new_leads(
     worksheet.update(rows, range_name=target_range, value_input_option="RAW")
 
 
+V1_SCORE_FIELDS = {
+    "sector_fit", "digital_maturity", "company_size_proxy", "operational_pain",
+    "reachability", "normalized_total", "penalties",
+}
+V2_SCORE_LIMITS = {
+    "automation_opportunity": 40,
+    "business_maturity": 20,
+    "contactability": 15,
+    "buying_intent": 15,
+    "ai_fit": 10,
+}
+
+
+def score_breakdown_version(raw_value: str) -> str:
+    """Classify a persisted score breakdown without changing it."""
+    try:
+        breakdown = json.loads(str(raw_value or ""))
+    except (TypeError, ValueError):
+        return "unknown"
+    if not isinstance(breakdown, dict):
+        return "unknown"
+    components = breakdown.get("components", {})
+    component_names = set(components) if isinstance(components, dict) else set()
+    if V1_SCORE_FIELDS & (set(breakdown) | component_names):
+        return "v1"
+    if set(V2_SCORE_LIMITS).issubset(component_names) and "total" in breakdown:
+        return "v2"
+    return "unknown"
+
+
+def validate_v2_score(result: dict[str, object]) -> None:
+    """Reject any migration result that violates the fixed V2 contract."""
+    breakdown = result.get("breakdown")
+    if not isinstance(breakdown, dict) or not isinstance(breakdown.get("components"), dict):
+        raise ValueError("V2 score has no component breakdown")
+    components = breakdown["components"]
+    if set(components) != set(V2_SCORE_LIMITS):
+        raise ValueError("V2 score categories do not match the required schema")
+    total = 0
+    for category, maximum in V2_SCORE_LIMITS.items():
+        component = components[category]
+        if not isinstance(component, dict):
+            raise ValueError(f"V2 category is malformed: {category}")
+        points = component.get("points")
+        declared_maximum = component.get("max")
+        if isinstance(points, bool) or not isinstance(points, int) or not 0 <= points <= maximum:
+            raise ValueError(f"V2 category is outside 0-{maximum}: {category}")
+        if declared_maximum != maximum:
+            raise ValueError(f"V2 category maximum is incorrect: {category}")
+        total += points
+    if breakdown.get("total") != total or result.get("score") != total:
+        raise ValueError("V2 total does not equal the sum of its categories")
+    if not 0 <= total <= 100:
+        raise ValueError("V2 total is outside 0-100")
+
+
+def migrate_ai_scores_worksheet(
+    worksheet: gspread.Worksheet,
+    force: bool = False,
+    backup_directory: Path | None = None,
+) -> dict[str, object]:
+    """Migrate historical score cells only, leaving all lead and outreach data intact."""
+    values = worksheet.get_all_values()
+    if not values:
+        raise ValueError("The Google Sheets worksheet is empty")
+    headers = [normalise_sheet_header(value) for value in values[0]]
+    duplicates = sorted({header for header in headers if header and headers.count(header) > 1})
+    if duplicates:
+        raise ValueError("Duplicate worksheet headers make migration unsafe: " + ", ".join(duplicates))
+    required = set(AI_BUYING_SCORE_COLUMNS) | {"lead_id", "industry", "score_breakdown"}
+    missing = sorted(required - set(headers))
+    if missing:
+        raise ValueError("Migration-required worksheet headers missing: " + ", ".join(missing))
+    positions = {header: index for index, header in enumerate(headers) if header}
+
+    scanned = migrated = already_v2 = failures = unclassified = 0
+    updates: list[dict[str, object]] = []
+    backup_rows: list[dict[str, object]] = []
+    for row_number, source_row in enumerate(values[1:], start=2):
+        row = list(source_row) + [""] * max(0, len(headers) - len(source_row))
+        row = row[:len(headers)]
+        if not any(str(value).strip() for value in row):
+            continue
+        scanned += 1
+        version = score_breakdown_version(row[positions["score_breakdown"]])
+        if version == "v2" and not force:
+            already_v2 += 1
+            continue
+        if version != "v1" and not force:
+            unclassified += 1
+            continue
+        lead = {header: row[index] for header, index in positions.items()}
+        try:
+            result = calculate_ai_buying_score(lead)
+            validate_v2_score(result)
+            replacement = {
+                "ai_buying_score": str(result["score"]),
+                "priority": str(result["priority"]),
+                "recommended_offer": str(result["recommended_offer"]),
+                "score_breakdown": json.dumps(result["breakdown"], ensure_ascii=False, sort_keys=True),
+            }
+        except (TypeError, ValueError, KeyError) as exc:
+            failures += 1
+            logging.error("AI score migration failed for row %d: %s", row_number, exc)
+            continue
+        backup_rows.append({
+            "row": row_number,
+            "lead_id": lead.get("lead_id", ""),
+            "values": {column: row[positions[column]] for column in AI_BUYING_SCORE_COLUMNS},
+        })
+        for column in AI_BUYING_SCORE_COLUMNS:
+            updates.append({
+                "range": rowcol_to_a1(row_number, positions[column] + 1),
+                "values": [[replacement[column]]],
+            })
+        migrated += 1
+
+    backup_path: Path | None = None
+    if updates:
+        destination = backup_directory or Path.cwd()
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = destination / f"ai_score_migration_backup_{timestamp}.json"
+        backup_path.write_text(json.dumps({
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "worksheet": worksheet.title,
+            "force": force,
+            "rows": backup_rows,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        for start in range(0, len(updates), 100):
+            worksheet.batch_update(updates[start:start + 100])
+
+    report: dict[str, object] = {
+        "rows_scanned": scanned,
+        "rows_migrated": migrated,
+        "rows_already_v2": already_v2,
+        "rows_unclassified": unclassified,
+        "failures": failures,
+        "backup_path": str(backup_path) if backup_path else "",
+    }
+    logging.info("AI score migration report")
+    logging.info("Rows scanned: %d", scanned)
+    logging.info("Rows migrated: %d", migrated)
+    logging.info("Rows already V2: %d", already_v2)
+    logging.info("Rows unclassified/skipped: %d", unclassified)
+    logging.info("Failures: %d", failures)
+    if backup_path:
+        logging.info("Rollback backup: %s", backup_path)
+    return report
+
+
+def migrate_ai_scores(settings: Settings, force: bool = False) -> int:
+    worksheet = sheets_worksheet(settings)
+    report = migrate_ai_scores_worksheet(worksheet, force=force)
+    return 1 if report["failures"] else 0
+
+
 def excel_column_name(column_number: int) -> str:
     if column_number < 1:
         raise ValueError("Column number must be positive")
@@ -2903,6 +3060,14 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--test-overpass", action="store_true",
         help="Run one live Overpass query only; do not access Google Sheets or enrich websites",
     )
+    parser.add_argument(
+        "--migrate-ai-scores", action="store_true",
+        help="Migrate historical V1 AI Buying Scores to the current V2 implementation",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="With --migrate-ai-scores, rescore rows even when they already contain V2 breakdowns",
+    )
     return parser.parse_args(argv)
 
 
@@ -2922,6 +3087,15 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         if args.self_test_osm:
             return run_mocked_osm_tests()
+        if args.force and not args.migrate_ai_scores:
+            raise ValueError("--force requires --migrate-ai-scores")
+        if args.migrate_ai_scores:
+            migration_settings = load_settings(
+                cities_override=flatten_cli_values(args.cities),
+                sectors_override=flatten_cli_values(args.sectors),
+                sources_override=flatten_cli_values(args.sources),
+            )
+            return migrate_ai_scores(migration_settings, force=args.force)
         if args.test_overpass:
             test_settings = load_settings(
                 dry_run=True,

@@ -1,5 +1,8 @@
 import unittest
+import json
+import tempfile
 from dataclasses import replace
+from pathlib import Path
 
 from bs4 import BeautifulSoup
 
@@ -19,6 +22,31 @@ def settings(**changes):
 
 
 class CollectorTests(unittest.TestCase):
+    @staticmethod
+    def migration_worksheet(rows):
+        headers = [
+            "lead_id", "company_name", "industry", "location", "email", "phone",
+            "website", "business_description", "automation_opportunity", "score",
+            "personalised_message", "contact_status", "reply_status", "sent_at",
+            "ai_buying_score", "priority", "recommended_offer", "score_breakdown",
+            "whatsapp", "contact_form_url",
+        ]
+
+        class Worksheet:
+            title = "Leads"
+
+            def __init__(self):
+                self.values = [headers] + [[row.get(header, "") for header in headers] for row in rows]
+                self.updates = []
+
+            def get_all_values(self):
+                return self.values
+
+            def batch_update(self, updates):
+                self.updates.extend(updates)
+
+        return Worksheet(), headers
+
     def test_round_robin_plan_covers_cartesian_product_once(self):
         configured = settings()
         plan = collector.round_robin_search_plan(configured)
@@ -159,6 +187,61 @@ class CollectorTests(unittest.TestCase):
         for category in ("automation_opportunity", "business_maturity", "buying_intent", "ai_fit"):
             self.assertEqual(left[category]["points"], right[category]["points"])
         self.assertEqual(right["contactability"]["points"] - left["contactability"]["points"], 3)
+
+    def test_v1_score_migration_updates_only_four_score_fields(self):
+        v1 = json.dumps({
+            "components": {"sector_fit": {"points": 25}},
+            "normalized_total": 43, "penalties": {"no_website": -20},
+        })
+        worksheet, headers = self.migration_worksheet([{
+            "lead_id": "lead_1", "company_name": "Atlas Hotel", "industry": "Hotels",
+            "email": "old@example.ma", "phone": "+212612345678", "website": "https://atlas.ma",
+            "business_description": "Hotel reservations and guest support services.",
+            "automation_opportunity": "Automate reservations and follow-up.",
+            "personalised_message": "Preserve me", "contact_status": "Sent",
+            "reply_status": "Interested", "sent_at": "2026-07-01", "ai_buying_score": "8",
+            "priority": "D", "recommended_offer": "Old offer", "score_breakdown": v1,
+        }])
+        with tempfile.TemporaryDirectory() as directory:
+            report = collector.migrate_ai_scores_worksheet(
+                worksheet, backup_directory=Path(directory)
+            )
+            backup = json.loads(Path(report["backup_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(report["rows_migrated"], 1)
+        self.assertEqual(len(worksheet.updates), 4)
+        updated_ranges = {update["range"] for update in worksheet.updates}
+        self.assertEqual(updated_ranges, {"O2", "P2", "Q2", "R2"})
+        replacements = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+        regenerated = json.loads(replacements["R2"])
+        self.assertEqual(int(replacements["O2"]), regenerated["total"])
+        self.assertEqual(replacements["P2"], "A+")
+        self.assertEqual(replacements["Q2"], "AI Reservation Assistant")
+        self.assertEqual(set(regenerated["components"]), set(collector.V2_SCORE_LIMITS))
+        self.assertEqual(backup["rows"][0]["values"]["ai_buying_score"], "8")
+
+    def test_v2_row_is_skipped_unless_forced(self):
+        lead = {
+            "lead_id": "lead_2", "company_name": "Atlas Hotel", "industry": "Hotels",
+            "phone": "+212612345678", "business_description": "Hotel reservation services.",
+        }
+        score = collector.calculate_ai_buying_score(lead)
+        row = {
+            **lead, "ai_buying_score": str(score["score"]), "priority": score["priority"],
+            "recommended_offer": score["recommended_offer"],
+            "score_breakdown": json.dumps(score["breakdown"]),
+        }
+        worksheet, _ = self.migration_worksheet([row])
+        report = collector.migrate_ai_scores_worksheet(worksheet)
+        self.assertEqual(report["rows_already_v2"], 1)
+        self.assertEqual(report["rows_migrated"], 0)
+        self.assertEqual(worksheet.updates, [])
+        forced, _ = self.migration_worksheet([row])
+        with tempfile.TemporaryDirectory() as directory:
+            forced_report = collector.migrate_ai_scores_worksheet(
+                forced, force=True, backup_directory=Path(directory)
+            )
+        self.assertEqual(forced_report["rows_migrated"], 1)
+        self.assertEqual(len(forced.updates), 4)
 
     def test_website_only_candidate_is_accepted(self):
         configured = settings(cities=["Agadir"], sectors=["Hotels"], sources=["pages_maroc"])
