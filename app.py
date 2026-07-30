@@ -44,7 +44,7 @@ REQUIRED_COLUMNS = [
     "location",
     "email",
     "phone",
-    "score",
+    "groq_score",
     "contact_status",
     "personalised_message",
     "sent_at",
@@ -58,6 +58,9 @@ REQUIRED_COLUMNS = [
     "reply_summary",
     "gmail_message_id",
     "ai_buying_score",
+]
+SHEET_REQUIRED_COLUMNS = [
+    "score" if column == "groq_score" else column for column in REQUIRED_COLUMNS
 ]
 
 
@@ -93,7 +96,7 @@ QUALIFICATION_LABELS = {
 }
 
 
-def qualification_for_score(score: int) -> str:
+def qualification_for_groq_score(score: int) -> str:
     """Return the only valid qualification for a 1-10 Groq score."""
     if score >= 8:
         return "high_priority"
@@ -102,6 +105,19 @@ def qualification_for_score(score: int) -> str:
     if score >= 4:
         return "manual_review"
     return "low_priority"
+
+
+def qualification_for_ai_buying_score(score: float) -> str:
+    """Derive the displayed qualification from the 0-100 AI Buying Score."""
+    if score >= 85:
+        return "Excellent Prospect"
+    if score >= 70:
+        return "High Priority"
+    if score >= 55:
+        return "Good Prospect"
+    if score >= 40:
+        return "Manual Review"
+    return "Low Priority"
 
 
 def qualification_label(qualification: str) -> str:
@@ -127,13 +143,18 @@ def sample_leads() -> pd.DataFrame:
 def normalise_leads(data: pd.DataFrame) -> pd.DataFrame:
     """Guarantee the dashboard schema and safe data types."""
     frame = data.copy()
+    if "groq_score" not in frame.columns and "score" in frame.columns:
+        frame["groq_score"] = frame["score"]
     for column in REQUIRED_COLUMNS:
         if column not in frame.columns:
-            frame[column] = 0 if column == "score" else ""
+            frame[column] = 0 if column in {"groq_score", "ai_buying_score"} else ""
     frame = frame[REQUIRED_COLUMNS]
-    frame["score"] = pd.to_numeric(frame["score"], errors="coerce").fillna(1).clip(1, 10)
+    frame["groq_score"] = pd.to_numeric(frame["groq_score"], errors="coerce").fillna(1).clip(1, 10)
+    frame["ai_buying_score"] = pd.to_numeric(
+        frame["ai_buying_score"], errors="coerce"
+    ).fillna(0).clip(0, 100)
     for column in REQUIRED_COLUMNS:
-        if column != "score":
+        if column not in {"groq_score", "ai_buying_score"}:
             frame[column] = frame[column].fillna("").astype(str)
     return frame
 
@@ -176,7 +197,7 @@ def load_leads(
         if not values:
             raise ValueError("The Google Sheets worksheet is empty.")
         headers = [str(header).strip() for header in values[0]]
-        for column in REQUIRED_COLUMNS:
+        for column in SHEET_REQUIRED_COLUMNS:
             if column not in headers:
                 headers.append(column)
                 worksheet.update_cell(1, len(headers), column)
@@ -216,7 +237,7 @@ def parse_groq_analysis(content: str) -> dict[str, Any]:
         raise ValueError("Groq returned invalid JSON.") from exc
 
     required = {
-        "leadScore",
+        "groq_score",
         "qualification",
         "recommendedService",
         "whyGoodProspect",
@@ -226,21 +247,21 @@ def parse_groq_analysis(content: str) -> dict[str, Any]:
     }
     if not isinstance(result, dict) or not required.issubset(result):
         raise ValueError("Groq's response is missing one or more required fields.")
-    if isinstance(result["leadScore"], bool) or not isinstance(result["leadScore"], int):
-        raise ValueError("Groq's leadScore must be an integer.")
-    if not 1 <= result["leadScore"] <= 10:
-        raise ValueError("Groq's leadScore must be between 1 and 10.")
+    if isinstance(result["groq_score"], bool) or not isinstance(result["groq_score"], int):
+        raise ValueError("Groq's groq_score must be an integer.")
+    if not 1 <= result["groq_score"] <= 10:
+        raise ValueError("Groq's groq_score must be between 1 and 10.")
     if not isinstance(result["qualification"], str) or not result["qualification"].strip():
         raise ValueError("Groq's qualification must be a non-empty string.")
     qualification = result["qualification"].strip().lower()
     if qualification not in QUALIFICATION_LABELS:
         allowed = ", ".join(QUALIFICATION_LABELS)
         raise ValueError(f"Groq's qualification must be one of: {allowed}.")
-    expected_qualification = qualification_for_score(result["leadScore"])
+    expected_qualification = qualification_for_groq_score(result["groq_score"])
     if qualification != expected_qualification:
         raise ValueError(
-            "Groq's qualification does not match its leadScore. "
-            f"A score of {result['leadScore']} requires {expected_qualification}."
+            "Groq's qualification does not match its groq_score. "
+            f"A score of {result['groq_score']} requires {expected_qualification}."
         )
     result["qualification"] = qualification
     for field in (
@@ -325,7 +346,7 @@ def analyse_with_groq(api_key: str, lead: pd.Series) -> dict[str, Any]:
         lead_payload[field] = str(lead.get(field, ""))
     prompt = f"""Analyse this business lead for BKZ and return raw JSON only.
 Do not use Markdown, commentary, or code fences. Use exactly these fields:
-{{"leadScore": <integer 1 to 10, never 0>,
+{{"groq_score": <integer 1 to 10, never 0>,
 "qualification": <"high_priority", "qualified", "manual_review", or "low_priority">,
 "recommendedService": <non-empty string>,
 "whyGoodProspect": <non-empty string>,
@@ -340,14 +361,14 @@ BKZ business context:
 - Website: https://bkz-automation.github.io/bkz-automation/
 - WhatsApp: +212708434058
 
-The qualification must exactly match the leadScore:
+The qualification must exactly match groq_score:
 - 8 to 10: "high_priority"
 - 6 to 7: "qualified"
 - 4 to 5: "manual_review"
 - 1 to 3: "low_priority"
 Never reject a lead. Scores 4 or 5 must always be "manual_review".
 
-Evaluate the leadScore using balanced evidence from:
+Evaluate groq_score using balanced evidence from:
 - the company name, industry, location, and other available company information;
 - the website value and whether it appears usable;
 - the business description;
@@ -438,7 +459,7 @@ def update_lead_csv(csv_path: str, lead_id: str, analysis: dict[str, Any]) -> No
     matches = frame["lead_id"].astype(str) == str(lead_id)
     if not matches.any():
         raise ValueError(f"Lead {lead_id} was not found in {path.name}.")
-    frame.loc[matches, "score"] = str(analysis["leadScore"])
+    frame.loc[matches, "score"] = str(analysis["groq_score"])
     frame.loc[matches, "contact_status"] = qualification_label(analysis["qualification"])
     frame.loc[matches, "personalised_message"] = analysis["personalisedMessage"]
     frame.loc[matches, "recommended_service"] = analysis["recommendedService"]
@@ -462,7 +483,7 @@ def update_google_sheet(
             raise ValueError("The Google Sheets worksheet is empty.")
 
         headers = [str(header).strip() for header in values[0]]
-        for column in REQUIRED_COLUMNS:
+        for column in SHEET_REQUIRED_COLUMNS:
             if column not in headers:
                 headers.append(column)
                 worksheet.update_cell(1, len(headers), column)
@@ -478,7 +499,7 @@ def update_google_sheet(
             raise ValueError(f"Lead {lead_id} was not found in Google Sheets.")
 
         updates = {
-            "score": str(analysis["leadScore"]),
+            "score": str(analysis["groq_score"]),
             "personalised_message": analysis["personalisedMessage"],
             "recommended_service": analysis["recommendedService"],
             "why_good_prospect": analysis["whyGoodProspect"],
@@ -743,7 +764,7 @@ def load_fresh_google_leads(
         if not values:
             raise ValueError("The Google Sheets worksheet is empty.")
         headers = [str(header).strip() for header in values[0]]
-        for column in REQUIRED_COLUMNS:
+        for column in SHEET_REQUIRED_COLUMNS:
             if column not in headers:
                 headers.append(column)
                 worksheet.update_cell(1, len(headers), column)
@@ -956,7 +977,7 @@ def update_google_sheet_reply(
         if not values:
             raise ValueError("The Google Sheets worksheet is empty.")
         headers = [str(header).strip() for header in values[0]]
-        for column in REQUIRED_COLUMNS:
+        for column in SHEET_REQUIRED_COLUMNS:
             if column not in headers:
                 headers.append(column)
                 worksheet.update_cell(1, len(headers), column)
@@ -1063,14 +1084,14 @@ def main() -> None:
         statuses = [status for status in status_order if status in available_statuses]
         statuses.extend(sorted(available_statuses.difference(status_order)))
         selected_statuses = st.multiselect("Contact status", statuses, placeholder="All statuses")
-        min_score = st.slider("Minimum score", 1, 10, 1, 1)
+        min_score = st.slider("Minimum AI Buying Score", 0, 100, 0, 1)
         locations = sorted(value for value in leads["location"].unique() if value)
         selected_locations = st.multiselect("Location", locations, placeholder="All locations")
         st.divider()
         source_label = "GOOGLE SHEETS" if sheets_connected else "CSV FALLBACK"
         st.markdown(f'<p class="source-note"><span class="status-dot"></span>Source: {source_label}</p>', unsafe_allow_html=True)
 
-    filtered = leads[leads["score"] >= min_score]
+    filtered = leads[leads["ai_buying_score"] >= min_score]
     if selected_statuses:
         filtered = filtered[filtered["contact_status"].isin(selected_statuses)]
     if selected_locations:
@@ -1084,14 +1105,13 @@ def main() -> None:
 
     metric_cols = st.columns(4)
     total = len(leads)
-    qualified_statuses = {"high priority", "qualified"}
-    qualified = int(leads["contact_status"].str.casefold().isin(qualified_statuses).sum())
+    qualified = int((leads["ai_buying_score"] >= 70).sum())
     emails_sent = int(leads["sent_at"].str.strip().ne("").sum())
-    average_score = leads["score"].mean() if total else 0
+    average_score = leads["ai_buying_score"].mean() if total else 0
     for column, label, value in zip(
         metric_cols,
-        ["Total Leads", "Qualified Leads", "Emails Sent", "Average Score"],
-        [f"{total:,}", f"{qualified:,}", f"{emails_sent:,}", f"{average_score:.1f}/10"],
+        ["Total Leads", "Qualified Leads", "Emails Sent", "Average AI Buying Score"],
+        [f"{total:,}", f"{qualified:,}", f"{emails_sent:,}", f"{average_score:.1f} / 100"],
     ):
         column.metric(label, value)
 
@@ -1121,12 +1141,14 @@ def main() -> None:
             st.rerun()
 
     st.dataframe(
-        filtered,
+        filtered.drop(columns=["groq_score"]),
         use_container_width=True,
         hide_index=True,
         height=390,
         column_config={
-            "score": st.column_config.ProgressColumn("score", min_value=1, max_value=10, format="%d"),
+            "ai_buying_score": st.column_config.ProgressColumn(
+                "AI Buying Score", min_value=0, max_value=100, format="%d / 100"
+            ),
             "personalised_message": st.column_config.TextColumn("personalised_message", width="large"),
             "website": st.column_config.TextColumn("website", width="medium"),
             "business_description": st.column_config.TextColumn("business_description", width="large"),
@@ -1420,8 +1442,7 @@ def main() -> None:
                     else:
                         update_lead_csv(csv_path, str(lead["lead_id"]), analysis)
                 st.session_state["notification_message"] = (
-                    f"Analysis saved: {qualification_label(analysis['qualification'])} "
-                    f"({analysis['leadScore']}/10). Dashboard refreshed."
+                    "Analysis saved. Dashboard refreshed."
                 )
                 st.session_state["notification_type"] = "success"
                 st.cache_data.clear()
@@ -1514,8 +1535,12 @@ def main() -> None:
         with st.container(border=True):
             company_col, score_col, qualification_col = st.columns([2, 1, 1])
             company_col.metric("Company name", str(lead["company_name"]))
-            score_col.metric("AI score", f"{int(lead['score'])}/10")
-            qualification_col.metric("Qualification", str(lead["contact_status"]))
+            ai_buying_score = float(lead["ai_buying_score"])
+            score_col.metric("AI Buying Score", f"{ai_buying_score:.0f} / 100")
+            qualification_col.metric(
+                "Qualification",
+                qualification_for_ai_buying_score(ai_buying_score),
+            )
 
             service_col, prospect_col = st.columns(2)
             with service_col:
