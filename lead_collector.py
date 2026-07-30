@@ -43,6 +43,90 @@ OPTIONAL_LEAD_COLUMNS = [
     "ai_buying_score", "recommended_service", "website_status", "facebook_url",
     "instagram_url", "linkedin_url", "contact_quality",
 ]
+AI_BUYING_SCORE_COLUMNS = [
+    "ai_buying_score", "priority", "recommended_offer", "score_breakdown",
+]
+LEAD_EXPORT_COLUMNS = SHEET_COLUMNS + AI_BUYING_SCORE_COLUMNS
+
+# AI Buying Score V1 is deliberately data-driven so commercial tuning does not
+# require changing the scoring flow below.
+AI_BUYING_SCORE_WEIGHTS = {
+    "sector_fit": {"max": 25, "high": 25, "medium": 18, "general": 10},
+    "digital_maturity": {"max": 15, "website": 8, "domain_email": 4, "social": 3},
+    "company_size_proxy": {"max": 12, "scale_signal": 12, "complete_contact": 7, "basic_footprint": 4},
+    "operational_pain": {"max": 12, "workflow_signal": 12, "high_fit_sector": 8, "general": 4},
+    "buying_intent": {"max": 10, "workflow_online": 10, "digital_contact": 7, "limited": 3},
+    "reachability": {"max": 8, "whatsapp": 8, "mobile": 6, "email": 4, "landline": 1},
+    "business_email": {"max": 6, "present": 6},
+    "decision_maker": {"max": 6, "signal": 6},
+    "growth_signals": {"max": 4, "signal": 4, "digital_footprint": 2},
+}
+AI_BUYING_SCORE_PENALTIES = {
+    "no_website": -20,
+    "landline_only": -15,
+    "inactive_company": -25,
+}
+AI_BUYING_SCORE_LIMITS = {"minimum": 0, "maximum": 100}
+AI_BUYING_SCORE_PRIORITY_THRESHOLDS = ((85, "A+"), (70, "A"), (55, "B"), (40, "C"))
+AI_BUYING_SCORE_BASE_MAX = sum(component["max"] for component in AI_BUYING_SCORE_WEIGHTS.values())
+
+AI_BUYING_SCORE_SOCIAL_FIELDS = ("facebook_url", "instagram_url", "linkedin_url")
+AI_BUYING_SCORE_HIGH_FIT_TERMS = (
+    "restaurant", "cafe", "hotel", "riad", "hote", "traiteur", "clinique",
+    "medical", "dentaire", "pharmac", "immobili", "ecole", "formation",
+    "creche", "salon", "beaute", "spa", "fitness", "sport", "agence",
+    "voyage", "centre appels",
+)
+AI_BUYING_SCORE_MEDIUM_FIT_TERMS = (
+    "avocat", "comptable", "architect", "construction", "transport", "securite",
+    "nettoyage", "garage", "automobile", "magasin", "boutique", "supermarche",
+    "bijouter", "opticien", "imprimer", "grossiste", "distributeur",
+)
+AI_BUYING_SCORE_OPERATIONAL_TERMS = (
+    "reservation", "rendez vous", "commande", "devis", "inscription", "livraison",
+    "consultation", "booking", "appointment", "order",
+)
+AI_BUYING_SCORE_SCALE_TERMS = (
+    "groupe", "group", "franchise", "succursale", "plusieurs", "multi",
+    "agences", "locations", "branches", "equipe", "team", "staff",
+)
+AI_BUYING_SCORE_GROWTH_TERMS = (
+    "nouveau", "new", "ouverture", "opening", "recrut", "expansion", "developp",
+    "promotion", "offre", "online", "en ligne", "reservation", "booking",
+)
+AI_BUYING_SCORE_DECISION_MAKER_TERMS = (
+    "gerant", "gerante", "directeur", "directrice", "director", "owner", "founder",
+    "fondateur", "fondatrice", "ceo", "manager",
+)
+AI_BUYING_SCORE_INACTIVE_TERMS = (
+    "ferme", "closed", "permanently closed", "cessation", "liquidation", "inactive",
+)
+AI_RECOMMENDED_OFFER_RULES = (
+    (("restaurant", "cafe", "hotel", "riad", "hote", "traiteur"), "AI WhatsApp Ordering and Reservation Assistant"),
+    (("clinique", "medical", "dentaire", "radiologie", "laboratoire", "veterinaire"), "AI Receptionist and Appointment Assistant"),
+    (("immobili", "location", "architect"), "AI Lead Qualification and Viewing Assistant"),
+    (("ecole", "formation", "creche", "auto ecole"), "AI Admissions and Prospect Follow-up Assistant"),
+    (("salon", "beaute", "spa", "fitness", "sport"), "AI Booking and Client Follow-up Assistant"),
+    (("agence", "avocat", "comptable", "etudes"), "AI Lead Qualification and CRM Follow-up Assistant"),
+    (("boutique", "magasin", "supermarche", "bijouter", "opticien"), "AI Customer Service and Order Assistant"),
+)
+AI_RECOMMENDED_OFFER_DEFAULT = "AI Lead Qualification and Follow-up Assistant"
+
+# Editable collection coverage. Environment variables LEAD_CITIES and LEAD_SECTORS
+# take precedence when a narrower or different campaign is required.
+SUPPORTED_CITIES = ["Agadir", "Casablanca", "Marrakech"]
+COLLECTION_CITIES = ["Agadir", "Marrakech"]
+COLLECTION_SECTORS = [
+    "Accounting Firms", "Law Firms", "Medical Clinics", "Dental Clinics",
+    "Laboratories", "Pharmacies", "Real Estate Agencies", "Construction Companies",
+    "Architecture Firms", "Engineering Firms", "Logistics Companies", "Freight Forwarders",
+    "Transport Companies", "Hotels", "Riads", "Travel Agencies", "Car Rental",
+    "Automotive Dealers", "Automotive Repair", "Industrial Suppliers", "Manufacturers",
+    "Import Export Companies", "Printing Companies", "Marketing Agencies", "Digital Agencies",
+    "Call Centers", "BPO Companies", "Training Centers", "Private Schools",
+    "Language Centers", "Security Companies", "Cleaning Companies", "IT Companies",
+    "Telecom Companies", "Furniture Companies", "Wholesale Businesses", "Distribution Companies",
+]
 
 DEFAULT_CITIES = ["Agadir", "Casablanca", "Marrakech"]
 
@@ -88,6 +172,40 @@ OVERPASS_AREA_CACHE: dict[str, int] = {}
 OVERPASS_RUN_REQUESTS = 0
 
 OSM_SECTOR_TAGS: dict[str, list[tuple[str, str]]] = {
+    "accounting firms": [("office", "accountant")],
+    "law firms": [("office", "lawyer")],
+    "medical clinics": [("healthcare", "clinic"), ("amenity", "clinic")],
+    "dental clinics": [("healthcare", "dentist"), ("amenity", "dentist")],
+    "laboratories": [("healthcare", "laboratory")],
+    "real estate agencies": [("office", "estate_agent")],
+    "construction companies": [("office", "construction_company")],
+    "architecture firms": [("office", "architect")],
+    "engineering firms": [("office", "engineer")],
+    "logistics companies": [("office", "logistics")],
+    "freight forwarders": [("office", "logistics")],
+    "transport companies": [("office", "logistics")],
+    "travel agencies": [("shop", "travel_agency")],
+    "car rental": [("amenity", "car_rental")],
+    "automotive dealers": [("shop", "car")],
+    "automotive repair": [("shop", "car_repair")],
+    "industrial suppliers": [("office", "company")],
+    "manufacturers": [("office", "company")],
+    "import export companies": [("office", "company")],
+    "printing companies": [("shop", "copyshop")],
+    "marketing agencies": [("office", "advertising_agency")],
+    "digital agencies": [("office", "it")],
+    "call centers": [("office", "telecommunication")],
+    "bpo companies": [("office", "telecommunication")],
+    "training centers": [("amenity", "training")],
+    "private schools": [("amenity", "school")],
+    "language centers": [("amenity", "language_school")],
+    "security companies": [("office", "security")],
+    "cleaning companies": [("office", "cleaning")],
+    "it companies": [("office", "it")],
+    "telecom companies": [("office", "telecommunication")],
+    "furniture companies": [("shop", "furniture")],
+    "wholesale businesses": [("shop", "wholesale")],
+    "distribution companies": [("office", "company")],
     "restaurants": [("amenity", "restaurant")],
     "cafes": [("amenity", "cafe")],
     "hotels": [("tourism", "hotel")],
@@ -200,8 +318,8 @@ def load_settings(
     max_place_details: int = 30,
 ) -> Settings:
     load_dotenv()
-    cities = cities_override or csv_setting("LEAD_CITIES", DEFAULT_CITIES)
-    allowed = {normalise_text(city): city for city in DEFAULT_CITIES}
+    cities = cities_override or csv_setting("LEAD_CITIES", COLLECTION_CITIES)
+    allowed = {normalise_text(city): city for city in SUPPORTED_CITIES}
     invalid = [city for city in cities if normalise_text(city) not in allowed]
     if invalid:
         raise ValueError(
@@ -222,7 +340,7 @@ def load_settings(
         )
     return Settings(
         cities=cities,
-        sectors=prioritize_sectors(sectors_override or csv_setting("LEAD_SECTORS", DEFAULT_SECTORS)),
+        sectors=prioritize_sectors(sectors_override or csv_setting("LEAD_SECTORS", COLLECTION_SECTORS)),
         max_results=(
             min(5, max(1, int(os.getenv("LEAD_MAX_RESULTS_PER_SECTOR_CITY", "5"))))
             if fast_mode else max(1, int(os.getenv("LEAD_MAX_RESULTS_PER_SECTOR_CITY", "5")))
@@ -1431,6 +1549,13 @@ def execute_source_pipeline(
         if settings.allow_landlines and classification == "landline":
             accepted_contact = True
         if accepted_contact:
+            # Score only leads that passed the existing contact acceptance policy.
+            # The score never changes whether a lead is accepted or rejected.
+            buying_score = calculate_ai_buying_score(lead)
+            lead["ai_buying_score"] = str(buying_score["score"])
+            lead["priority"] = str(buying_score["priority"])
+            lead["recommended_offer"] = str(buying_score["recommended_offer"])
+            lead["score_breakdown"] = json.dumps(buying_score["breakdown"], ensure_ascii=False, sort_keys=True)
             leads.append(lead)
             reason = (
                 "mobile" if classification == "mobile"
@@ -1439,6 +1564,11 @@ def execute_source_pipeline(
             )
             logging.debug("Candidate name=%r accepted reason=%s", lead.get("company_name", ""), reason)
             logging.info("Lead accepted: %s | %s", lead.get("company_name", ""), reason)
+            logging.info(
+                "AI buying score: %s | score=%s | priority=%s | offer=%s",
+                lead.get("company_name", ""), buying_score["score"],
+                buying_score["priority"], buying_score["recommended_offer"],
+            )
         else:
             rejected_no_mobile_email += 1
             logging.info("Lead rejected after all enrichment sources exhausted: %s", lead.get("company_name", ""))
@@ -1619,6 +1749,147 @@ def automation_opportunity(sector: str) -> str:
     return "Automatiser la qualification des prospects, les devis, rendez-vous et relances clients."
 
 
+def recommended_ai_offer(sector: str) -> str:
+    """Choose one deterministic BKZ offer from the lead's business sector."""
+    key = normalise_text(sector)
+    for keywords, offer in AI_RECOMMENDED_OFFER_RULES:
+        if any(word in key for word in keywords):
+            return offer
+    return AI_RECOMMENDED_OFFER_DEFAULT
+
+
+def calculate_ai_buying_score(lead: dict[str, str]) -> dict[str, object]:
+    """Return an explainable, deterministic 0-100 buying score for one accepted lead.
+
+    The supplied component maxima add to 98.  Their relative weights are retained and
+    the base is normalized to 100 before applying explicit risk penalties.
+    """
+    sector = normalise_text(lead.get("industry", ""))
+    description = normalise_text(" ".join((
+        lead.get("company_name", ""),
+        lead.get("business_description", ""),
+        lead.get("automation_opportunity", ""),
+    )))
+    website = canonical_website_url(lead.get("website", ""))
+    email = str(lead.get("email", "")).strip().casefold()
+    phone_classification = str(lead.get("_phone_classification", ""))
+    whatsapp = bool(lead.get("whatsapp_confirmed"))
+    website_host = (urlparse(website).hostname or "").lower().removeprefix("www.")
+    email_domain = email.rsplit("@", 1)[-1] if "@" in email else ""
+    social_presence = any(bool(lead.get(field)) for field in AI_BUYING_SCORE_SOCIAL_FIELDS)
+
+    if any(term in sector for term in AI_BUYING_SCORE_HIGH_FIT_TERMS):
+        sector_fit, sector_reason = AI_BUYING_SCORE_WEIGHTS["sector_fit"]["high"], "sector has a high-volume automation use case"
+    elif any(term in sector for term in AI_BUYING_SCORE_MEDIUM_FIT_TERMS):
+        sector_fit, sector_reason = AI_BUYING_SCORE_WEIGHTS["sector_fit"]["medium"], "sector has a practical automation use case"
+    else:
+        sector_fit, sector_reason = AI_BUYING_SCORE_WEIGHTS["sector_fit"]["general"], "sector fit is general rather than vertical-specific"
+
+    digital_maturity = 0
+    digital_reasons: list[str] = []
+    if website:
+        digital_maturity += AI_BUYING_SCORE_WEIGHTS["digital_maturity"]["website"]
+        digital_reasons.append("official website")
+    if email and website_host and (email_domain == website_host or email_domain.endswith("." + website_host)):
+        digital_maturity += AI_BUYING_SCORE_WEIGHTS["digital_maturity"]["domain_email"]
+        digital_reasons.append("domain-matched business email")
+    if social_presence:
+        digital_maturity += AI_BUYING_SCORE_WEIGHTS["digital_maturity"]["social"]
+        digital_reasons.append("public business social profile")
+
+    if any(term in description for term in AI_BUYING_SCORE_SCALE_TERMS):
+        company_size, company_size_reason = AI_BUYING_SCORE_WEIGHTS["company_size_proxy"]["scale_signal"], "multi-site, team, or group signal found"
+    elif website and email and phone_classification == "mobile":
+        company_size, company_size_reason = AI_BUYING_SCORE_WEIGHTS["company_size_proxy"]["complete_contact"], "complete public contact footprint"
+    elif website or email:
+        company_size, company_size_reason = AI_BUYING_SCORE_WEIGHTS["company_size_proxy"]["basic_footprint"], "basic public business footprint"
+    else:
+        company_size, company_size_reason = 0, "no size proxy available"
+
+    if any(term in description for term in AI_BUYING_SCORE_OPERATIONAL_TERMS):
+        operational_pain, operational_reason = AI_BUYING_SCORE_WEIGHTS["operational_pain"]["workflow_signal"], "booking, order, quote, or appointment workflow detected"
+    elif any(term in sector for term in AI_BUYING_SCORE_HIGH_FIT_TERMS):
+        operational_pain, operational_reason = AI_BUYING_SCORE_WEIGHTS["operational_pain"]["high_fit_sector"], "sector commonly has repetitive customer workflows"
+    else:
+        operational_pain, operational_reason = AI_BUYING_SCORE_WEIGHTS["operational_pain"]["general"], "general follow-up opportunity"
+
+    if any(term in description for term in AI_BUYING_SCORE_OPERATIONAL_TERMS) and website:
+        buying_intent, buying_intent_reason = AI_BUYING_SCORE_WEIGHTS["buying_intent"]["workflow_online"], "active service workflow is visible online"
+    elif website and (email or phone_classification == "mobile" or whatsapp):
+        buying_intent, buying_intent_reason = AI_BUYING_SCORE_WEIGHTS["buying_intent"]["digital_contact"], "active digital contact path is available"
+    elif website or email:
+        buying_intent, buying_intent_reason = AI_BUYING_SCORE_WEIGHTS["buying_intent"]["limited"], "limited public buying-intent evidence"
+    else:
+        buying_intent, buying_intent_reason = 0, "no public buying-intent evidence"
+
+    if whatsapp:
+        reachability, reachability_reason = AI_BUYING_SCORE_WEIGHTS["reachability"]["whatsapp"], "explicit WhatsApp contact"
+    elif phone_classification == "mobile":
+        reachability, reachability_reason = AI_BUYING_SCORE_WEIGHTS["reachability"]["mobile"], "public Moroccan mobile"
+    elif email:
+        reachability, reachability_reason = AI_BUYING_SCORE_WEIGHTS["reachability"]["email"], "public email contact"
+    elif phone_classification == "landline":
+        reachability, reachability_reason = AI_BUYING_SCORE_WEIGHTS["reachability"]["landline"], "landline only"
+    else:
+        reachability, reachability_reason = 0, "no reachable contact"
+
+    business_email = AI_BUYING_SCORE_WEIGHTS["business_email"]["present"] if email else 0
+    business_email_reason = "public business email" if email else "no public business email"
+    email_local_part = email.split("@", 1)[0] if "@" in email else ""
+    if any(term in f"{email_local_part} {description}" for term in AI_BUYING_SCORE_DECISION_MAKER_TERMS):
+        decision_maker, decision_maker_reason = AI_BUYING_SCORE_WEIGHTS["decision_maker"]["signal"], "decision-maker signal in public contact data"
+    else:
+        decision_maker, decision_maker_reason = 0, "no decision-maker signal available"
+    if any(term in description for term in AI_BUYING_SCORE_GROWTH_TERMS):
+        growth_signals, growth_reason = AI_BUYING_SCORE_WEIGHTS["growth_signals"]["signal"], "growth or active-service signal found"
+    elif website and (email or phone_classification == "mobile"):
+        growth_signals, growth_reason = AI_BUYING_SCORE_WEIGHTS["growth_signals"]["digital_footprint"], "active digital business footprint"
+    else:
+        growth_signals, growth_reason = 0, "no public growth signal"
+
+    components = {
+        "sector_fit": {"points": sector_fit, "max": AI_BUYING_SCORE_WEIGHTS["sector_fit"]["max"], "reason": sector_reason},
+        "digital_maturity": {"points": digital_maturity, "max": AI_BUYING_SCORE_WEIGHTS["digital_maturity"]["max"], "reason": ", ".join(digital_reasons) or "no digital maturity signal"},
+        "company_size_proxy": {"points": company_size, "max": AI_BUYING_SCORE_WEIGHTS["company_size_proxy"]["max"], "reason": company_size_reason},
+        "operational_pain": {"points": operational_pain, "max": AI_BUYING_SCORE_WEIGHTS["operational_pain"]["max"], "reason": operational_reason},
+        "buying_intent": {"points": buying_intent, "max": AI_BUYING_SCORE_WEIGHTS["buying_intent"]["max"], "reason": buying_intent_reason},
+        "reachability": {"points": reachability, "max": AI_BUYING_SCORE_WEIGHTS["reachability"]["max"], "reason": reachability_reason},
+        "business_email": {"points": business_email, "max": AI_BUYING_SCORE_WEIGHTS["business_email"]["max"], "reason": business_email_reason},
+        "decision_maker": {"points": decision_maker, "max": AI_BUYING_SCORE_WEIGHTS["decision_maker"]["max"], "reason": decision_maker_reason},
+        "growth_signals": {"points": growth_signals, "max": AI_BUYING_SCORE_WEIGHTS["growth_signals"]["max"], "reason": growth_reason},
+    }
+    raw_total = sum(int(component["points"]) for component in components.values())
+    normalized_total = round(raw_total * AI_BUYING_SCORE_LIMITS["maximum"] / AI_BUYING_SCORE_BASE_MAX)
+    penalties: dict[str, int] = {}
+    if not website:
+        penalties["no_website"] = AI_BUYING_SCORE_PENALTIES["no_website"]
+    if phone_classification == "landline":
+        penalties["landline_only"] = AI_BUYING_SCORE_PENALTIES["landline_only"]
+    if any(term in description for term in AI_BUYING_SCORE_INACTIVE_TERMS):
+        penalties["inactive_company"] = AI_BUYING_SCORE_PENALTIES["inactive_company"]
+    penalty_total = sum(penalties.values())
+    score = max(AI_BUYING_SCORE_LIMITS["minimum"], min(AI_BUYING_SCORE_LIMITS["maximum"], normalized_total + penalty_total))
+    priority = next((label for threshold, label in AI_BUYING_SCORE_PRIORITY_THRESHOLDS if score >= threshold), "D")
+    reasons = [
+        f"{name.replace('_', ' ')}: {component['points']}/{component['max']} ({component['reason']})"
+        for name, component in components.items() if component["points"]
+    ]
+    reasons.extend(f"penalty {name.replace('_', ' ')}: {points}" for name, points in penalties.items())
+    return {
+        "score": score,
+        "priority": priority,
+        "recommended_offer": recommended_ai_offer(lead.get("industry", "")),
+        "breakdown": {
+            "components": components,
+            "raw_total": raw_total,
+            "normalized_total": normalized_total,
+            "penalties": penalties,
+            "penalty_total": penalty_total,
+        },
+        "reasons": reasons,
+    }
+
+
 def make_lead_id(name: str, phone: str, website: str) -> str:
     raw = "|".join((normalise_text(name), normalise_phone(phone), canonical_url(website)))
     return "lead_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -1660,6 +1931,22 @@ def normalise_sheet_header(value: str) -> str:
     return (value or "").strip().casefold()
 
 
+def ensure_ai_buying_score_columns(worksheet: gspread.Worksheet) -> list[str]:
+    """Append V1 score columns only when an existing worksheet lacks them."""
+    headers = worksheet.row_values(1)
+    present = {normalise_sheet_header(header) for header in headers if normalise_sheet_header(header)}
+    missing = [column for column in AI_BUYING_SCORE_COLUMNS if column not in present]
+    if not missing:
+        return headers
+    start_column = len(headers) + 1
+    end_column = start_column + len(missing) - 1
+    target_range = f"{excel_column_name(start_column)}1:{excel_column_name(end_column)}1"
+    worksheet.update([missing], range_name=target_range, value_input_option="RAW")
+    headers.extend(missing)
+    logging.info("Added AI buying score columns: %s", ", ".join(missing))
+    return headers
+
+
 def read_existing(worksheet: gspread.Worksheet) -> tuple[list[dict[str, str]], list[str]]:
     values = worksheet.get_all_values()
     worksheet_headers = values[0] if values else []
@@ -1670,7 +1957,7 @@ def read_existing(worksheet: gspread.Worksheet) -> tuple[list[dict[str, str]], l
         if normalized and normalized not in header_positions:
             header_positions[normalized] = index
 
-    missing = [column for column in SHEET_COLUMNS if column not in header_positions]
+    missing = [column for column in LEAD_EXPORT_COLUMNS if column not in header_positions]
     if missing:
         logging.error("Required worksheet headers missing: %s", ", ".join(missing))
         raise ValueError(
@@ -1713,8 +2000,11 @@ def write_new_leads(
     rows: list[list[str]] = []
     for lead in leads:
         row = [""] * len(worksheet_headers)
-        for column in SHEET_COLUMNS:
-            row[header_positions[column]] = str(lead.get(column, defaults.get(column, "")))
+        for column in LEAD_EXPORT_COLUMNS:
+            # The normal collection path has already migrated the header.  Keeping
+            # this guard preserves older direct callers and repair/test utilities.
+            if column in header_positions:
+                row[header_positions[column]] = str(lead.get(column, defaults.get(column, "")))
         rows.append(row)
     if any(len(row) != len(worksheet_headers) for row in rows):
         raise RuntimeError("Generated lead row width does not match worksheet headers; no rows were written")
@@ -1929,6 +2219,7 @@ def collect(settings: Settings) -> int:
     if not settings.dry_run:
         try:
             worksheet = sheets_worksheet(settings)
+            ensure_ai_buying_score_columns(worksheet)
             existing, worksheet_headers = read_existing(worksheet)
             logging.info("Read %d existing leads from worksheet %s", len(existing), settings.worksheet_name)
         except Exception as exc:

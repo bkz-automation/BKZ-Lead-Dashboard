@@ -40,8 +40,8 @@ class SummaryCollector(logging.Handler):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--city", default="Agadir", choices=("Agadir", "Casablanca", "Marrakech"))
-    parser.add_argument("--sector", default="restaurants", help="Business sector to collect")
+    parser.add_argument("--city", choices=("Agadir", "Casablanca", "Marrakech"), help="Optional city override")
+    parser.add_argument("--sector", help="Optional sector override")
     parser.add_argument("--target-leads", type=int, default=20)
     parser.add_argument("--max-searches", type=int, default=4)
     parser.add_argument("--write-sheets", action="store_true", help="Enable the collector's existing Google Sheets write step")
@@ -51,11 +51,13 @@ def parse_args() -> argparse.Namespace:
 
 def collector_args(args: argparse.Namespace) -> list[str]:
     forwarded = [
-        "--cities", args.city,
-        "--sectors", args.sector,
         "--target-leads", str(args.target_leads),
         "--max-searches", str(args.max_searches),
     ]
+    if args.city:
+        forwarded.extend(("--cities", args.city))
+    if args.sector:
+        forwarded.extend(("--sectors", args.sector))
     if not args.write_sheets:
         forwarded.append("--dry-run")
     if args.verbose:
