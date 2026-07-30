@@ -116,3 +116,19 @@ Never commit `.env`, `.streamlit/secrets.toml`, `service_account.json`, `gmail_c
 Google Sheets is the primary data source. When it is unavailable locally, the dashboard uses `leads.csv` as a fallback and displays that source in the sidebar. Google Sheets remains required for Gmail status and reply updates.
 
 The application preserves all lead qualification, Gmail sending, safe queue, reply monitoring, filters, KPIs, WhatsApp, notification, and AI Outreach Message features in both environments.
+
+## Collector scheduling and contact policy
+
+The collector builds a deterministic round-robin plan over every configured
+city, sector, and provider. `--max-searches` is a global provider-call limit;
+when omitted, it equals the complete plan size. A smaller explicit value is
+rejected before network or Google Sheets access, preventing silent partial
+coverage. Two cities, 37 sectors, and four providers require 296 searches. The
+run can still finish early after reaching its deduplicated lead target.
+
+Each run reports searches by provider, city, and sector, remaining budget, and
+the exact stop reason. Candidates qualify with any business contact channel:
+website, phone, WhatsApp, or email. Official homepages and bounded Contact/About
+pages are checked for email, Moroccan phone numbers, WhatsApp links, and contact
+forms. WhatsApp and contact-form values are exported into worksheet columns that
+the collector creates when absent.

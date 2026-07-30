@@ -22,7 +22,7 @@ class SummaryCollector(logging.Handler):
         "whatsapp_found": re.compile(r"^Leads with confirmed WhatsApp: (\d+)$"),
         "accepted_dry_run": re.compile(r"^Dry-run candidates \(not appended\): (\d+)$"),
         "accepted_live": re.compile(r"^Leads appended: (\d+)$"),
-        "accepted_candidates": re.compile(r"^Run summary: .*leads found=(\d+),"),
+        "candidates_enriched": re.compile(r"^Candidates enriched: (\d+)$"),
     }
 
     def __init__(self) -> None:
@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--city", choices=("Agadir", "Casablanca", "Marrakech"), help="Optional city override")
     parser.add_argument("--sector", help="Optional sector override")
     parser.add_argument("--target-leads", type=int, default=20)
-    parser.add_argument("--max-searches", type=int, default=4)
+    parser.add_argument("--max-searches", type=int, help="Optional global search limit; must cover the complete plan")
     parser.add_argument("--write-sheets", action="store_true", help="Enable the collector's existing Google Sheets write step")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
@@ -52,8 +52,9 @@ def parse_args() -> argparse.Namespace:
 def collector_args(args: argparse.Namespace) -> list[str]:
     forwarded = [
         "--target-leads", str(args.target_leads),
-        "--max-searches", str(args.max_searches),
     ]
+    if args.max_searches is not None:
+        forwarded.extend(("--max-searches", str(args.max_searches)))
     if args.city:
         forwarded.extend(("--cities", args.city))
     if args.sector:
@@ -81,7 +82,7 @@ def print_summary(values: dict[str, int], runtime_seconds: float, dry_run: bool)
     lines = (
         "Lead collection summary",
         f"Businesses discovered: {values.get('businesses_discovered', 0)}",
-        f"Businesses enriched: {values.get('accepted_candidates', 0) + rejected}",
+        f"Businesses enriched: {values.get('candidates_enriched', 0)}",
         f"Accepted leads: {accepted}",
         f"Rejected leads: {rejected}",
         f"Emails found: {values.get('emails_found', 0)}",

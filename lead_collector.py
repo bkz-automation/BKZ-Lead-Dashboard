@@ -19,6 +19,7 @@ import re
 import sys
 import time
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -46,7 +47,8 @@ OPTIONAL_LEAD_COLUMNS = [
 AI_BUYING_SCORE_COLUMNS = [
     "ai_buying_score", "priority", "recommended_offer", "score_breakdown",
 ]
-LEAD_EXPORT_COLUMNS = SHEET_COLUMNS + AI_BUYING_SCORE_COLUMNS
+CONTACT_COLUMNS = ["whatsapp", "contact_form_url"]
+LEAD_EXPORT_COLUMNS = SHEET_COLUMNS + AI_BUYING_SCORE_COLUMNS + CONTACT_COLUMNS
 
 # AI Buying Score V1 is deliberately data-driven so commercial tuning does not
 # require changing the scoring flow below.
@@ -299,6 +301,54 @@ class Settings:
     worksheet_name: str
     credentials_file: str
     dry_run: bool
+
+
+@dataclass(frozen=True)
+class SearchTask:
+    """One globally-budgeted provider/city/sector discovery operation."""
+    provider: str
+    city: str
+    sector: str
+
+
+@dataclass
+class RunStatistics:
+    searches_by_provider: Counter[str]
+    searches_by_city: Counter[str]
+    searches_by_sector: Counter[str]
+    candidates_discovered: int = 0
+    candidates_enriched: int = 0
+    candidates_rejected: int = 0
+    duplicates_skipped: int = 0
+
+    @classmethod
+    def create(cls) -> "RunStatistics":
+        return cls(Counter(), Counter(), Counter())
+
+    @property
+    def searches(self) -> int:
+        return sum(self.searches_by_provider.values())
+
+    def record_search(self, task: SearchTask) -> None:
+        self.searches_by_provider[task.provider] += 1
+        self.searches_by_city[task.city] += 1
+        self.searches_by_sector[task.sector] += 1
+
+
+def round_robin_search_plan(settings: Settings) -> list[SearchTask]:
+    """Interleave providers, cities and sectors while covering their full product."""
+    plan: list[SearchTask] = []
+    for sector_index in range(len(settings.sectors)):
+        city_offset = sector_index % len(settings.cities)
+        cities = settings.cities[city_offset:] + settings.cities[:city_offset]
+        for city_index, city in enumerate(cities):
+            sector = settings.sectors[sector_index]
+            for provider_index in range(len(settings.sources)):
+                provider = settings.sources[
+                    (provider_index + sector_index + city_index) % len(settings.sources)
+                ]
+                plan.append(SearchTask(provider, city, sector))
+    return plan
 
 
 def csv_setting(name: str, default: list[str]) -> list[str]:
@@ -562,6 +612,7 @@ class PublicWebClient:
                 return directory_lead_to_sheet(result, sector, city)
             result = dict(result)
             result["email"] = preferred_public_email(soup, page_text, response.url) or email
+            result["contact_form_url"] = contact_form_from_soup(soup, response.url)
             whatsapp_phone = explicit_whatsapp_from_soup(soup)
             page_phone = first_moroccan_phone(soup, page_text)
             result["phone"] = whatsapp_phone or page_phone or phone
@@ -592,6 +643,9 @@ class PublicWebClient:
                     internal_text = clean_text(internal_soup.get_text(" ", strip=True))
                     result["email"] = result["email"] or preferred_public_email(
                         internal_soup, internal_text, response.url
+                    )
+                    result["contact_form_url"] = result.get("contact_form_url") or contact_form_from_soup(
+                        internal_soup, internal_url
                     )
                     internal_whatsapp = explicit_whatsapp_from_soup(internal_soup)
                     internal_phone = first_moroccan_phone(internal_soup, internal_text)
@@ -1188,6 +1242,22 @@ def explicit_whatsapp_from_soup(soup: BeautifulSoup) -> str:
     return explicit_whatsapp_number(values)
 
 
+def contact_form_from_soup(soup: BeautifulSoup, page_url: str) -> str:
+    """Return the page containing a usable public contact form, if present."""
+    for form in soup.select("form"):
+        evidence = normalise_text(" ".join((
+            form.get("action", ""), form.get("id", ""),
+            " ".join(form.get("class", [])), form.get_text(" ", strip=True)[:500],
+        )))
+        has_contact_input = bool(form.select_one(
+            'input[type="email"], input[type="tel"], textarea, '
+            'input[name*="email" i], input[name*="phone" i], input[name*="message" i]'
+        ))
+        if has_contact_input or any(word in evidence for word in ("contact", "message", "demande", "devis")):
+            return canonical_url(page_url)
+    return ""
+
+
 def overpass_json(client: PublicWebClient, query: str) -> dict[str, object]:
     global OVERPASS_RUN_REQUESTS
     last_error: Exception | None = None
@@ -1467,6 +1537,8 @@ def directory_lead_to_sheet(result: dict[str, str], sector: str, city: str) -> d
         "_google_place_id": place_id,
         "_osm_identity": osm_identity,
         "whatsapp_confirmed": bool(result.get("whatsapp_confirmed")),
+        "whatsapp": canonical_moroccan_phone(result.get("phone", "")) if result.get("whatsapp_confirmed") else "",
+        "contact_form_url": canonical_url(result.get("contact_form_url", "")),
     }
 
 
@@ -1512,11 +1584,12 @@ def execute_source_pipeline(
     client.start_sector_timer(60.0)
     for item in parsed[:candidate_limit]:
         logging.info("Primary candidate retained for enrichment: %s", item.get("company_name", ""))
-    parsed, candidates_enriched, failed_sources, successful_sources = apply_directory_fallbacks(
+    parsed, _, failed_sources, successful_sources = apply_directory_fallbacks(
         client, parsed, source_name, sector, city, candidate_limit, disabled_sources or set(),
     )
     leads: list[dict[str, str]] = []
     rejected_no_mobile_email = 0
+    candidates_enriched = 0
     seen: set[str] = set()
     for item in parsed[:candidate_limit]:
         if len(leads) >= accepted_limit:
@@ -1529,6 +1602,7 @@ def execute_source_pipeline(
         if not directory_location_valid(item.get("location", ""), city) or source_key in seen:
             continue
         seen.add(source_key)
+        candidates_enriched += 1
         if item.get("website"):
             logging.info("Website found: %s | %s", item.get("company_name", ""), item["website"])
         else:
@@ -1545,9 +1619,10 @@ def execute_source_pipeline(
             continue
         lead = apply_phone_policy(lead, settings.allow_landlines)
         classification = lead.get("_phone_classification")
-        accepted_contact = bool(lead.get("email")) or classification == "mobile" or bool(lead.get("whatsapp_confirmed"))
-        if settings.allow_landlines and classification == "landline":
-            accepted_contact = True
+        accepted_contact = bool(
+            lead.get("website") or lead.get("email") or lead.get("phone")
+            or lead.get("whatsapp_confirmed") or lead.get("_landline_phone")
+        )
         if accepted_contact:
             # Score only leads that passed the existing contact acceptance policy.
             # The score never changes whether a lead is accepted or rejected.
@@ -1560,7 +1635,8 @@ def execute_source_pipeline(
             reason = (
                 "mobile" if classification == "mobile"
                 else "public email" if lead.get("email")
-                else "landline allowed"
+                else "website" if lead.get("website")
+                else "business phone"
             )
             logging.debug("Candidate name=%r accepted reason=%s", lead.get("company_name", ""), reason)
             logging.info("Lead accepted: %s | %s", lead.get("company_name", ""), reason)
@@ -1931,11 +2007,11 @@ def normalise_sheet_header(value: str) -> str:
     return (value or "").strip().casefold()
 
 
-def ensure_ai_buying_score_columns(worksheet: gspread.Worksheet) -> list[str]:
-    """Append V1 score columns only when an existing worksheet lacks them."""
+def ensure_export_columns(worksheet: gspread.Worksheet) -> list[str]:
+    """Append collector-managed export columns when an existing sheet lacks them."""
     headers = worksheet.row_values(1)
     present = {normalise_sheet_header(header) for header in headers if normalise_sheet_header(header)}
-    missing = [column for column in AI_BUYING_SCORE_COLUMNS if column not in present]
+    missing = [column for column in AI_BUYING_SCORE_COLUMNS + CONTACT_COLUMNS if column not in present]
     if not missing:
         return headers
     start_column = len(headers) + 1
@@ -1943,7 +2019,7 @@ def ensure_ai_buying_score_columns(worksheet: gspread.Worksheet) -> list[str]:
     target_range = f"{excel_column_name(start_column)}1:{excel_column_name(end_column)}1"
     worksheet.update([missing], range_name=target_range, value_input_option="RAW")
     headers.extend(missing)
-    logging.info("Added AI buying score columns: %s", ", ".join(missing))
+    logging.info("Added collector export columns: %s", ", ".join(missing))
     return headers
 
 
@@ -2219,7 +2295,7 @@ def collect(settings: Settings) -> int:
     if not settings.dry_run:
         try:
             worksheet = sheets_worksheet(settings)
-            ensure_ai_buying_score_columns(worksheet)
+            ensure_export_columns(worksheet)
             existing, worksheet_headers = read_existing(worksheet)
             logging.info("Read %d existing leads from worksheet %s", len(existing), settings.worksheet_name)
         except Exception as exc:
@@ -2239,12 +2315,24 @@ def collect(settings: Settings) -> int:
     osm_businesses_discovered_total = 0
     source_consecutive_failures = {source: 0 for source in settings.sources}
     circuit_open: set[str] = set()
+    statistics = RunStatistics.create()
+    required_searches = len(round_robin_search_plan(settings))
+    if settings.max_searches is not None and settings.max_searches < required_searches:
+        raise ValueError(
+            f"--max-searches={settings.max_searches} cannot cover the configured search plan; "
+            f"at least {required_searches} searches are required for "
+            f"{len(settings.cities)} cities x {len(settings.sectors)} sectors x "
+            f"{len(settings.sources)} providers"
+        )
+    search_budget = settings.max_searches if settings.max_searches is not None else required_searches
+    logging.info("Global search budget: %d | complete coverage requires: %d", search_budget, required_searches)
 
     stop = False
     stop_reason = "configured cities and sectors exhausted"
-    for city in settings.cities:
-        logging.info("City started: %s", city)
-        for sector in settings.sectors:
+    logging.info("Round-robin schedule: deterministic full city/sector/provider coverage")
+    for sector_index, sector in enumerate(settings.sectors):
+        scheduled_cities = settings.cities[sector_index % len(settings.cities):] + settings.cities[:sector_index % len(settings.cities)]
+        for city_index, city in enumerate(scheduled_cities):
             if (
                 len(new_leads) >= run_limit
                 or (settings.max_searches is not None and searches >= settings.max_searches)
@@ -2255,17 +2343,13 @@ def collect(settings: Settings) -> int:
                     else "maximum searches reached"
                 )
                 break
+            logging.info("City scheduled: %s", city)
             logging.info("Sector started: %s | City: %s", sector, city)
             sector_started = time.monotonic()
             sector_timed_out = False
             results: list[dict[str, str]] = []
-            available_sources = [source for source in settings.sources if source not in circuit_open]
-            # Fast mode limits pagination and per-candidate enrichment; it must not
-            # silently limit discovery to the first provider.  Running each enabled
-            # source allows unique directory-only businesses to enter the candidate
-            # pool, while apply_directory_fallbacks enriches matching businesses
-            # before the contact acceptance gate is reached.
-            sector_sources = available_sources
+            provider_offset = (sector_index + city_index) % len(settings.sources)
+            sector_sources = settings.sources[provider_offset:] + settings.sources[:provider_offset]
             for source_name in sector_sources:
                 if source_name in circuit_open:
                     logging.info("Source circuit breaker open; skipped for rest of run: %s", source_name)
@@ -2286,7 +2370,12 @@ def collect(settings: Settings) -> int:
                         stop = True
                     break
                 searches += 1
+                statistics.record_search(SearchTask(source_name, city, sector))
                 logging.info("Source used: %s | Sector: %s | City: %s", source_name, sector, city)
+                logging.info(
+                    "Search budget after iteration %d: remaining=%d | provider=%s | city=%s | sector=%s",
+                    searches, search_budget - searches, source_name, city, sector,
+                )
                 source_timeout_failure = False
                 pipeline_rejected = 0
                 pipeline_discovered = 0
@@ -2300,7 +2389,9 @@ def collect(settings: Settings) -> int:
                 executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                 future = executor.submit(
                     execute_source_pipeline, settings, source_name, sector, city, remaining,
-                    set(circuit_open),
+                    # Every provider has its own globally-budgeted schedule entry.
+                    # Do not make hidden, uncounted provider calls during enrichment.
+                    set(settings.sources),
                 )
                 try:
                     if settings.fast_mode:
@@ -2345,6 +2436,9 @@ def collect(settings: Settings) -> int:
                 rejected_no_mobile_email += pipeline_rejected
                 candidates_discovered_total += pipeline_discovered
                 candidates_enriched_total += pipeline_enriched
+                statistics.candidates_rejected += pipeline_rejected
+                statistics.candidates_discovered += pipeline_discovered
+                statistics.candidates_enriched += pipeline_enriched
                 text_search_requests_total += pipeline_text_requests
                 place_details_requests_total += pipeline_detail_requests
                 overpass_requests_total += pipeline_overpass_requests
@@ -2393,6 +2487,7 @@ def collect(settings: Settings) -> int:
                 keys = identity_keys(lead)
                 if keys & known:
                     duplicates += 1
+                    statistics.duplicates_skipped += 1
                     logging.info("Duplicate skipped: %s", lead.get("company_name", ""))
                     continue
                 known.update(keys)
@@ -2405,7 +2500,7 @@ def collect(settings: Settings) -> int:
                     logging.info("Target reached: %d leads", run_limit)
                     break
             logging.info("Sector duration: %.2f seconds | %s | %s", time.monotonic() - sector_started, sector, city)
-        logging.info("City processed: %s", city)
+        logging.info("Sector cycle processed: %s", sector)
         if stop:
             break
 
@@ -2416,6 +2511,10 @@ def collect(settings: Settings) -> int:
             raise RuntimeError(f"Google Sheets explicit A:T write failed: {exc}") from exc
     logging.info("Run summary: source searches completed=%d, leads found=%d, duplicates removed=%d, leads appended=%d",
                  searches, found, duplicates, 0 if settings.dry_run else len(new_leads))
+    logging.info("Searches per provider: %s", json.dumps(dict(sorted(statistics.searches_by_provider.items())), sort_keys=True))
+    logging.info("Searches per city: %s", json.dumps(dict(sorted(statistics.searches_by_city.items())), sort_keys=True))
+    logging.info("Searches per sector: %s", json.dumps(dict(sorted(statistics.searches_by_sector.items())), sort_keys=True))
+    logging.info("Search budget remaining: %d", search_budget - searches)
     logging.info("Text Search requests: %d", text_search_requests_total)
     logging.info("Place Details requests: %d", place_details_requests_total)
     overpass_requests_total = max(overpass_requests_total, OVERPASS_RUN_REQUESTS)
