@@ -41,6 +41,8 @@ jobs:
           GOOGLE_WORKSHEET_NAME: ${{ secrets.GOOGLE_WORKSHEET_NAME }}
           GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
         run: |
+          echo "Collector revision: ${GITHUB_SHA}"
+          python -c "import lead_collector; print(f'Collector module: {lead_collector.__file__}')"
           python run_lead_collection.py --write-sheets
 
       - name: Remove temporary credentials

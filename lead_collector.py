@@ -425,6 +425,10 @@ class PublicWebClient:
         phone = result.get("phone", "")
         description = result.get("business_description", "")
         if not website:
+            logging.info(
+                "Website crawl skipped: %s | no official website supplied by the discovery sources",
+                result.get("company_name", ""),
+            )
             return directory_lead_to_sheet(result, sector, city)
         original_deadline = self.sector_deadline
         website_deadline = time.monotonic() + 8.0
@@ -1440,11 +1444,14 @@ def execute_source_pipeline(
     client.start_sector_timer(SECTOR_TIMEOUT_SECONDS)
     for item in parsed[:candidate_limit]:
         logging.info("Primary candidate retained for enrichment: %s", item.get("company_name", ""))
-    parsed, candidates_enriched, failed_sources, successful_sources = apply_directory_fallbacks(
+    parsed, fallback_enriched, failed_sources, successful_sources = apply_directory_fallbacks(
         client, parsed, source_name, sector, city, candidate_limit, disabled_sources or set(),
     )
+    if fallback_enriched:
+        logging.info("Candidates enriched through cross-source matches: %d", fallback_enriched)
     leads: list[dict[str, str]] = []
     rejected_no_mobile_email = 0
+    candidates_enriched = 0
     seen: set[str] = set()
     for item in parsed[:candidate_limit]:
         if len(leads) >= accepted_limit:
@@ -1457,6 +1464,7 @@ def execute_source_pipeline(
         if not directory_location_valid(item.get("location", ""), city) or source_key in seen:
             continue
         seen.add(source_key)
+        candidates_enriched += 1
         if item.get("website"):
             logging.info("Website found: %s | %s", item.get("company_name", ""), item["website"])
         else:
