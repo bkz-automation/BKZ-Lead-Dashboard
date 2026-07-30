@@ -2018,7 +2018,10 @@ def collect(settings: Settings) -> int:
                             pipeline_failed_sources, pipeline_successful_sources,
                             pipeline_text_requests, pipeline_detail_requests,
                             pipeline_overpass_requests, pipeline_osm_discovered,
-                        ) = future.result(timeout=40)
+                        # The worker has separate 60-second discovery and enrichment
+                        # windows.  Wait for that bounded work to return its accepted
+                        # leads instead of discarding them after 40 seconds.
+                        ) = future.result(timeout=125.0)
                     else:
                         (
                             parsed, pipeline_rejected, pipeline_discovered, pipeline_enriched,
